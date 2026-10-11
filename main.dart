@@ -758,6 +758,7 @@ class _HomeState extends State<Home> {
             _run(store.rescan());
           } else if (v == 'tags') {
             _run(store.refreshTags());
+          }
         },
         itemBuilder: (_) => const [
           PopupMenuItem(value: 'add', child: Text('Add songs')),
