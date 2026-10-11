@@ -97,6 +97,12 @@ jobs:
           '''
           t = open(fn).read()
           open(fn, 'w').write(add + t)
+          p = 'pubspec.yaml'
+          ps = open(p).read()
+          if 'url_launcher' not in ps:
+              ps = ps.replace('dependencies:\n', 'dependencies:\n  url_launcher: ^6.3.0\n', 1)
+              open(p, 'w').write(ps)
+              print('added url_launcher to pubspec.yaml')
           print('patched', fn)
           PY
 
