@@ -13,14 +13,12 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 const green = Color(0xFF1DB954);
 const _exts = {'.mp3', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.flac'};
 const kRepo = String.fromEnvironment('REPO');
 const kBuild = int.fromEnvironment('BUILD', defaultValue: 0);
 final player = AudioPlayer();
-const kGeniusToken = 'kmYmNvyaolVLmZxPsxFwLCDlTYl2UG9T0bJyoaVQCwNBcdvlvoJeaqB7bj2Te7Wua9R9Lpn4I9wDxnxwz5L9FQ';
 
 // ---- metadata enrichment helpers
 Future<Map<String, String?>?> _lookupMusicBrainz(String title, String artist) async {
@@ -72,22 +70,42 @@ Future<String?> _fetchItunesArt(String title, String artist) async {
   }
 }
 
-Future<String?> _fetchGeniusLyrics(String title, String artist) async {
-  try {
-    final q = Uri.encodeComponent('$title $artist');
-    final r = await http.get(
-      Uri.parse('https://api.genius.com/search?q=$q'),
-      headers: {'Authorization': 'Bearer $kGeniusToken'},
-    ).timeout(const Duration(seconds: 10));
-    if (r.statusCode != 200) return null;
-    final j = jsonDecode(r.body) as Map;
-    final hits = (j['response']?['hits'] as List?);
-    if (hits == null || hits.isEmpty) return null;
-    final url = (hits.first as Map)['result']?['url'] as String?;
-    return url; // store the Genius URL; lyrics page opened in browser
-  } catch (_) {
-    return null;
+Future<String?> _fetchLrcLibLyrics(String title, String artist) async {
+  // Try with artist first, then fall back to title-only if artist is unknown
+  final queries = artist == 'Unknown artist'
+      ? ['https://lrclib.net/api/search?q=${Uri.encodeComponent(title)}']
+      : [
+          'https://lrclib.net/api/search?q=${Uri.encodeComponent('$title $artist')}',
+          'https://lrclib.net/api/search?q=${Uri.encodeComponent(title)}',
+        ];
+  for (final url in queries) {
+    try {
+      final r = await http.get(Uri.parse(url),
+          headers: {'User-Agent': 'SoundWave/1.0 (soundwave-app)'})
+          .timeout(const Duration(seconds: 10));
+      if (r.statusCode != 200) continue;
+      final list = jsonDecode(r.body) as List?;
+      if (list == null || list.isEmpty) continue;
+      // Prefer plain lyrics; fall back to synced lyrics stripped of timestamps
+      for (final item in list) {
+        final plain = (item as Map)['plainLyrics'] as String?;
+        if (plain != null && plain.trim().isNotEmpty) return plain.trim();
+      }
+      for (final item in list) {
+        final synced = (item as Map)['syncedLyrics'] as String?;
+        if (synced != null && synced.trim().isNotEmpty) {
+          // Strip [mm:ss.xx] timestamps
+          final plain = synced
+              .split('\n')
+              .map((l) => l.replaceFirst(RegExp(r'^\[\d+:\d+\.\d+\]\s*'), ''))
+              .where((l) => l.trim().isNotEmpty)
+              .join('\n');
+          if (plain.isNotEmpty) return plain;
+        }
+      }
+    } catch (_) {}
   }
+  return null;
 }
 
 final store = Store();
@@ -125,14 +143,14 @@ class SoundWaveApp extends StatelessWidget {
 class Song {
   final String id, path;
   String title, artist;
-  String? art, lyricsUrl;
+  String? art, lyrics;
   int dur;
   bool own;
-  Song(this.id, this.title, this.artist, this.path, {this.art, this.lyricsUrl, this.dur = 0, this.own = true});
+  Song(this.id, this.title, this.artist, this.path, {this.art, this.lyrics, this.dur = 0, this.own = true});
   Map<String, dynamic> toJson() =>
-      {'id': id, 'title': title, 'artist': artist, 'path': path, 'art': art, 'lyricsUrl': lyricsUrl, 'dur': dur, 'own': own};
+      {'id': id, 'title': title, 'artist': artist, 'path': path, 'art': art, 'lyrics': lyrics, 'dur': dur, 'own': own};
   factory Song.fromJson(Map j) =>
-      Song(j['id'], j['title'], j['artist'], j['path'], art: j['art'], lyricsUrl: j['lyricsUrl'], dur: j['dur'] ?? 0, own: j['own'] ?? true);
+      Song(j['id'], j['title'], j['artist'], j['path'], art: j['art'], lyrics: j['lyrics'] ?? j['lyricsUrl'], dur: j['dur'] ?? 0, own: j['own'] ?? true);
 }
 
 class Playlist {
@@ -317,9 +335,9 @@ class Store extends ChangeNotifier {
         } catch (_) {}
       }
     }
-    // Fetch Genius lyrics URL
-    final lyricsUrl = await _fetchGeniusLyrics(s.title, s.artist);
-    if (lyricsUrl != null) s.lyricsUrl = lyricsUrl;
+    // Fetch lyrics from LRCLib
+    final lyrics = await _fetchLrcLibLyrics(s.title, s.artist);
+    if (lyrics != null) s.lyrics = lyrics;
   }
 
   Future<String> refreshTags() async {
@@ -334,24 +352,7 @@ class Store extends ChangeNotifier {
     return 'Album art refreshed';
   }
 
-  Future<String> refreshLyrics() async {
-    var n = 0;
-    for (var i = 0; i < songs.length; i++) {
-      busy = 'Fetching lyrics ${i + 1} of ${songs.length}…';
-      notifyListeners();
-      await Future.delayed(Duration.zero);
-      final s = songs[i];
-      if (s.lyricsUrl != null) continue;
-      final url = await _fetchGeniusLyrics(s.title, s.artist);
-      if (url != null) {
-        s.lyricsUrl = url;
-        n++;
-      }
-    }
-    busy = null;
-    touch();
-    return 'Found lyrics for $n song${n == 1 ? '' : 's'}';
-  }
+
 
   // ---- importing
   Future<int> _import(List<MapEntry<String, String>> items, bool own) async {
@@ -757,16 +758,12 @@ class _HomeState extends State<Home> {
             _run(store.rescan());
           } else if (v == 'tags') {
             _run(store.refreshTags());
-          } else {
-            _run(store.refreshLyrics());
-          }
         },
         itemBuilder: (_) => const [
           PopupMenuItem(value: 'add', child: Text('Add songs')),
           PopupMenuItem(value: 'scan', child: Text('Scan a folder')),
           PopupMenuItem(value: 'rescan', child: Text('Rescan saved folders')),
           PopupMenuItem(value: 'tags', child: Text('Refresh album art & tags')),
-          PopupMenuItem(value: 'lyrics', child: Text('Refresh lyrics')),
         ],
       );
 
@@ -1112,10 +1109,6 @@ class MiniPlayer extends StatelessWidget {
   }
 }
 
-void _openUrl(String url) async {
-  final uri = Uri.parse(url);
-  if (await canLaunchUrl(uri)) await launchUrl(uri, mode: LaunchMode.externalApplication);
-}
 
 class NowPlaying extends StatelessWidget {
   const NowPlaying({super.key});
@@ -1209,11 +1202,40 @@ class NowPlaying extends StatelessWidget {
                         label: Text(sleep == null ? 'Sleep' : '~${sleep.difference(DateTime.now()).inMinutes + 1}m'),
                         onPressed: () => pickSleep(context)),
                     const SizedBox(width: 8),
-                    if (s.lyricsUrl != null)
+                    if (s.lyrics != null)
                       ActionChip(
                           avatar: const Icon(Icons.lyrics_outlined, size: 18),
                           label: const Text('Lyrics'),
-                          onPressed: () => _openUrl(s.lyricsUrl!)),
+                          onPressed: () => showModalBottomSheet(
+                                context: context,
+                                isScrollControlled: true,
+                                backgroundColor: const Color(0xFF1A1A1A),
+                                shape: const RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+                                builder: (_) => DraggableScrollableSheet(
+                                      expand: false,
+                                      initialChildSize: 0.6,
+                                      maxChildSize: 0.92,
+                                      minChildSize: 0.3,
+                                      builder: (_, sc) => Column(children: [
+                                        const SizedBox(height: 12),
+                                        Container(width: 40, height: 4,
+                                            decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
+                                        const SizedBox(height: 12),
+                                        Text(s.title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                                        Text(s.artist, style: const TextStyle(color: Colors.white54, fontSize: 13)),
+                                        const Divider(height: 24, color: Colors.white12),
+                                        Expanded(
+                                          child: SingleChildScrollView(
+                                            controller: sc,
+                                            padding: const EdgeInsets.fromLTRB(24, 0, 24, 32),
+                                            child: Text(s.lyrics!,
+                                                style: const TextStyle(fontSize: 15, height: 1.8, color: Colors.white70)),
+                                          ),
+                                        ),
+                                      ]),
+                                    ),
+                              )),
                   ]),
                 ]),
               ),
