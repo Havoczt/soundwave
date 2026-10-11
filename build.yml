@@ -109,7 +109,7 @@ jobs:
 
       - name: Build APK
         working-directory: app
-        run: flutter build apk --release --target-platform android-arm64 --build-name=1.1.${{ github.run_number }} --build-number=$((100 + ${{ github.run_number }})) --dart-define=REPO=${{ github.repository }} --dart-define=BUILD=${{ github.run_number }}
+        run: flutter build apk --release --target-platform android-arm64 --build-name=1.1.${{ github.run_number }} --build-number=$((100 + ${{ github.run_number }})) --dart-define=REPO=${{ github.repository }} --dart-define=REF=${{ github.ref_name }}
 
       - name: Name the file
         run: cp app/build/app/outputs/flutter-apk/app-release.apk SoundWave.apk
