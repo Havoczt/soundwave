@@ -35,7 +35,8 @@ jobs:
       - name: Add packages and patch the Android project
         working-directory: app
         run: |
-          flutter pub add just_audio:^0.9.40 just_audio_background:^0.0.1-beta.13 file_picker:^8.1.2 path_provider:^2.1.4 path:^1.9.0 shared_preferences:^2.3.2 audio_metadata_reader permission_handler:^12.0.0 http open_filex url_launcher
+          flutter pub add just_audio:^0.9.40 just_audio_background:^0.0.1-beta.13 file_picker:^8.1.2 path_provider:^2.1.4 path:^1.9.0 shared_preferences:^2.3.2 audio_metadata_reader permission_handler:^12.0.0 http open_filex
+          flutter pub add url_launcher
           python3 - <<'PY'
           import os
           f = 'android/app/src/main/AndroidManifest.xml'
@@ -109,7 +110,7 @@ jobs:
 
       - name: Build APK
         working-directory: app
-        run: flutter build apk --release --target-platform android-arm64 --build-name=1.1.${{ github.run_number }} --build-number=$((100 + ${{ github.run_number }})) --dart-define=REPO=${{ github.repository }} --dart-define=REF=${{ github.ref_name }}
+        run: flutter build apk --release --target-platform android-arm64 --build-name=1.1.${{ github.run_number }} --build-number=$((100 + ${{ github.run_number }})) --dart-define=REPO=${{ github.repository }} --dart-define=BUILD=${{ github.run_number }}
 
       - name: Name the file
         run: cp app/build/app/outputs/flutter-apk/app-release.apk SoundWave.apk
