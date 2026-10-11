@@ -32,6 +32,12 @@ jobs:
           flutter create --org com.soundwave --project-name soundwave --platforms android app
           cp main.dart app/lib/main.dart
 
+      - name: Patch pubspec
+        working-directory: app
+        run: |
+          echo "  url_launcher: ^6.3.0" > pubspec.yaml
+          flutter pub get
+
       - name: Add packages and patch the Android project
         working-directory: app
         run: |
