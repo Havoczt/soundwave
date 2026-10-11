@@ -232,7 +232,7 @@ class Store extends ChangeNotifier {
       for (final a in (j['assets'] as List)) {
         if ('${a['name']}'.endsWith('.apk')) url = '${a['browser_download_url']}';
       }
-      if (url != null && build > kBuild) {
+      if (url != null && kBuild > 0 && build > kBuild) {
         updateUrl = url;
         updateTag = tag;
         notifyListeners();
@@ -332,6 +332,25 @@ class Store extends ChangeNotifier {
     busy = null;
     touch();
     return 'Album art refreshed';
+  }
+
+  Future<String> refreshLyrics() async {
+    var n = 0;
+    for (var i = 0; i < songs.length; i++) {
+      busy = 'Fetching lyrics ${i + 1} of ${songs.length}…';
+      notifyListeners();
+      await Future.delayed(Duration.zero);
+      final s = songs[i];
+      if (s.lyricsUrl != null) continue;
+      final url = await _fetchGeniusLyrics(s.title, s.artist);
+      if (url != null) {
+        s.lyricsUrl = url;
+        n++;
+      }
+    }
+    busy = null;
+    touch();
+    return 'Found lyrics for $n song${n == 1 ? '' : 's'}';
   }
 
   // ---- importing
@@ -736,8 +755,10 @@ class _HomeState extends State<Home> {
             _run(store.scanFolder());
           } else if (v == 'rescan') {
             _run(store.rescan());
-          } else {
+          } else if (v == 'tags') {
             _run(store.refreshTags());
+          } else {
+            _run(store.refreshLyrics());
           }
         },
         itemBuilder: (_) => const [
@@ -745,6 +766,7 @@ class _HomeState extends State<Home> {
           PopupMenuItem(value: 'scan', child: Text('Scan a folder')),
           PopupMenuItem(value: 'rescan', child: Text('Rescan saved folders')),
           PopupMenuItem(value: 'tags', child: Text('Refresh album art & tags')),
+          PopupMenuItem(value: 'lyrics', child: Text('Refresh lyrics')),
         ],
       );
 
