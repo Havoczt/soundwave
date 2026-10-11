@@ -25,7 +25,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
-          cache: true
+          cache: false
 
       - name: Create Flutter project
         run: |
@@ -36,6 +36,7 @@ jobs:
         working-directory: app
         run: |
           flutter pub add just_audio:^0.9.40 just_audio_background:^0.0.1-beta.13 file_picker:^8.1.2 path_provider:^2.1.4 path:^1.9.0 shared_preferences:^2.3.2 audio_metadata_reader permission_handler:^12.0.0 http open_filex
+          flutter pub add url_launcher
           python3 - <<'PY'
           import os
           f = 'android/app/src/main/AndroidManifest.xml'

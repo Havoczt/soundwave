@@ -13,12 +13,83 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 const green = Color(0xFF1DB954);
 const _exts = {'.mp3', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.flac'};
 const kRepo = String.fromEnvironment('REPO');
 const kBuild = int.fromEnvironment('BUILD', defaultValue: 0);
 final player = AudioPlayer();
+const kGeniusToken = 'kmYmNvyaolVLmZxPsxFwLCDlTYl2UG9T0bJyoaVQCwNBcdvlvoJeaqB7bj2Te7Wua9R9Lpn4I9wDxnxwz5L9FQ';
+
+// ---- metadata enrichment helpers
+Future<Map<String, String?>?> _lookupMusicBrainz(String title, String artist) async {
+  try {
+    final q = Uri.encodeComponent(
+        artist == 'Unknown artist' ? title : '$title $artist');
+    final r = await http.get(
+      Uri.parse('https://musicbrainz.org/ws/2/recording/?query=$q&limit=1&fmt=json'),
+      headers: {'User-Agent': 'SoundWave/1.0 (soundwave-app)'},
+    ).timeout(const Duration(seconds: 10));
+    if (r.statusCode != 200) return null;
+    final j = jsonDecode(r.body) as Map;
+    final recs = j['recordings'] as List?;
+    if (recs == null || recs.isEmpty) return null;
+    final rec = recs.first as Map;
+    final foundTitle = rec['title'] as String?;
+    String? foundArtist;
+    final credits = rec['artist-credit'] as List?;
+    if (credits != null && credits.isNotEmpty) {
+      foundArtist = (credits.first as Map)['artist']?['name'] as String?;
+    }
+    String? releaseId;
+    final releases = rec['releases'] as List?;
+    if (releases != null && releases.isNotEmpty) {
+      releaseId = (releases.first as Map)['id'] as String?;
+    }
+    return {'title': foundTitle, 'artist': foundArtist, 'releaseId': releaseId};
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<String?> _fetchItunesArt(String title, String artist) async {
+  try {
+    final q = Uri.encodeComponent('$title $artist');
+    final r = await http.get(
+      Uri.parse('https://itunes.apple.com/search?term=$q&media=music&limit=1'),
+    ).timeout(const Duration(seconds: 10));
+    if (r.statusCode != 200) return null;
+    final j = jsonDecode(r.body) as Map;
+    final results = j['results'] as List?;
+    if (results == null || results.isEmpty) return null;
+    final art = (results.first as Map)['artworkUrl100'] as String?;
+    if (art == null) return null;
+    // get higher res version
+    return art.replaceAll('100x100bb', '600x600bb');
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<String?> _fetchGeniusLyrics(String title, String artist) async {
+  try {
+    final q = Uri.encodeComponent('$title $artist');
+    final r = await http.get(
+      Uri.parse('https://api.genius.com/search?q=$q'),
+      headers: {'Authorization': 'Bearer $kGeniusToken'},
+    ).timeout(const Duration(seconds: 10));
+    if (r.statusCode != 200) return null;
+    final j = jsonDecode(r.body) as Map;
+    final hits = (j['response']?['hits'] as List?);
+    if (hits == null || hits.isEmpty) return null;
+    final url = (hits.first as Map)['result']?['url'] as String?;
+    return url; // store the Genius URL; lyrics page opened in browser
+  } catch (_) {
+    return null;
+  }
+}
+
 final store = Store();
 
 Future<void> main() async {
@@ -54,14 +125,14 @@ class SoundWaveApp extends StatelessWidget {
 class Song {
   final String id, path;
   String title, artist;
-  String? art;
+  String? art, lyricsUrl;
   int dur;
   bool own;
-  Song(this.id, this.title, this.artist, this.path, {this.art, this.dur = 0, this.own = true});
+  Song(this.id, this.title, this.artist, this.path, {this.art, this.lyricsUrl, this.dur = 0, this.own = true});
   Map<String, dynamic> toJson() =>
-      {'id': id, 'title': title, 'artist': artist, 'path': path, 'art': art, 'dur': dur, 'own': own};
+      {'id': id, 'title': title, 'artist': artist, 'path': path, 'art': art, 'lyricsUrl': lyricsUrl, 'dur': dur, 'own': own};
   factory Song.fromJson(Map j) =>
-      Song(j['id'], j['title'], j['artist'], j['path'], art: j['art'], dur: j['dur'] ?? 0, own: j['own'] ?? true);
+      Song(j['id'], j['title'], j['artist'], j['path'], art: j['art'], lyricsUrl: j['lyricsUrl'], dur: j['dur'] ?? 0, own: j['own'] ?? true);
 }
 
 class Playlist {
@@ -161,7 +232,7 @@ class Store extends ChangeNotifier {
       for (final a in (j['assets'] as List)) {
         if ('${a['name']}'.endsWith('.apk')) url = '${a['browser_download_url']}';
       }
-      if (url != null && build > kBuild) {
+      if (url != null && kBuild > 0 && build > kBuild) {
         updateUrl = url;
         updateTag = tag;
         notifyListeners();
@@ -225,6 +296,32 @@ class Store extends ChangeNotifier {
     } catch (_) {}
   }
 
+  Future<void> _enrich(Song s) async {
+    final needsMeta = s.artist == 'Unknown artist' ||
+        s.title == p.basenameWithoutExtension(s.path).replaceAll('_', ' ').trim();
+    // Always try to get lyrics URL; only fetch full meta if tags are missing
+    if (needsMeta) {
+      final mb = await _lookupMusicBrainz(s.title, s.artist);
+      if (mb != null) {
+        if ((mb['title'] ?? '').isNotEmpty) s.title = mb['title']!;
+        if ((mb['artist'] ?? '').isNotEmpty) s.artist = mb['artist']!;
+      }
+    }
+    // Fetch album art from iTunes if not already set
+    if (s.art == null) {
+      final artUrl = await _fetchItunesArt(s.title, s.artist);
+      if (artUrl != null) {
+        try {
+          final r = await http.get(Uri.parse(artUrl)).timeout(const Duration(seconds: 10));
+          if (r.statusCode == 200) s.art = await _saveArt(s.id, r.bodyBytes);
+        } catch (_) {}
+      }
+    }
+    // Fetch Genius lyrics URL
+    final lyricsUrl = await _fetchGeniusLyrics(s.title, s.artist);
+    if (lyricsUrl != null) s.lyricsUrl = lyricsUrl;
+  }
+
   Future<String> refreshTags() async {
     for (var i = 0; i < songs.length; i++) {
       busy = 'Reading tags ${i + 1} of ${songs.length}…';
@@ -235,6 +332,25 @@ class Store extends ChangeNotifier {
     busy = null;
     touch();
     return 'Album art refreshed';
+  }
+
+  Future<String> refreshLyrics() async {
+    var n = 0;
+    for (var i = 0; i < songs.length; i++) {
+      busy = 'Fetching lyrics ${i + 1} of ${songs.length}…';
+      notifyListeners();
+      await Future.delayed(Duration.zero);
+      final s = songs[i];
+      if (s.lyricsUrl != null) continue;
+      final url = await _fetchGeniusLyrics(s.title, s.artist);
+      if (url != null) {
+        s.lyricsUrl = url;
+        n++;
+      }
+    }
+    busy = null;
+    touch();
+    return 'Found lyrics for $n song${n == 1 ? '' : 's'}';
   }
 
   // ---- importing
@@ -263,6 +379,7 @@ class Store extends ChangeNotifier {
       }
       final s = Song(id, title, artist, path, own: own);
       await _applyTags(s);
+      await _enrich(s);
       songs.insert(0, s);
       n++;
     }
@@ -638,8 +755,10 @@ class _HomeState extends State<Home> {
             _run(store.scanFolder());
           } else if (v == 'rescan') {
             _run(store.rescan());
-          } else {
+          } else if (v == 'tags') {
             _run(store.refreshTags());
+          } else {
+            _run(store.refreshLyrics());
           }
         },
         itemBuilder: (_) => const [
@@ -647,6 +766,7 @@ class _HomeState extends State<Home> {
           PopupMenuItem(value: 'scan', child: Text('Scan a folder')),
           PopupMenuItem(value: 'rescan', child: Text('Rescan saved folders')),
           PopupMenuItem(value: 'tags', child: Text('Refresh album art & tags')),
+          PopupMenuItem(value: 'lyrics', child: Text('Refresh lyrics')),
         ],
       );
 
@@ -992,6 +1112,11 @@ class MiniPlayer extends StatelessWidget {
   }
 }
 
+void _openUrl(String url) async {
+  final uri = Uri.parse(url);
+  if (await canLaunchUrl(uri)) await launchUrl(uri, mode: LaunchMode.externalApplication);
+}
+
 class NowPlaying extends StatelessWidget {
   const NowPlaying({super.key});
   @override
@@ -1078,11 +1203,17 @@ class NowPlaying extends StatelessWidget {
                         avatar: const Icon(Icons.speed, size: 18),
                         label: Text('${store.speed}x'),
                         onPressed: () => pickSpeed(context)),
-                    const SizedBox(width: 12),
+                    const SizedBox(width: 8),
                     ActionChip(
                         avatar: const Icon(Icons.bedtime_outlined, size: 18),
-                        label: Text(sleep == null ? 'Sleep timer' : 'Sleep in ~${sleep.difference(DateTime.now()).inMinutes + 1}m'),
+                        label: Text(sleep == null ? 'Sleep' : '~${sleep.difference(DateTime.now()).inMinutes + 1}m'),
                         onPressed: () => pickSleep(context)),
+                    const SizedBox(width: 8),
+                    if (s.lyricsUrl != null)
+                      ActionChip(
+                          avatar: const Icon(Icons.lyrics_outlined, size: 18),
+                          label: const Text('Lyrics'),
+                          onPressed: () => _openUrl(s.lyricsUrl!)),
                   ]),
                 ]),
               ),
