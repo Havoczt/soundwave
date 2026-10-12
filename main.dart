@@ -5,8 +5,10 @@ import 'dart:math' show min;
 import 'package:audio_metadata_reader/audio_metadata_reader.dart' as md;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
+import 'package:open_filex/open_filex.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -14,7 +16,123 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 const green = Color(0xFF1DB954);
 const _exts = {'.mp3', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.flac'};
+const kRepo = String.fromEnvironment('REPO');
+const kBuild = int.fromEnvironment('BUILD', defaultValue: 0);
 final player = AudioPlayer();
+
+// ---- metadata enrichment helpers
+Future<Map<String, String?>?> _lookupMusicBrainz(String title, String artist) async {
+  try {
+    final q = Uri.encodeComponent(
+        artist == 'Unknown artist' ? title : '$title $artist');
+    final r = await http.get(
+      Uri.parse('https://musicbrainz.org/ws/2/recording/?query=$q&limit=1&fmt=json'),
+      headers: {'User-Agent': 'SoundWave/1.0 (soundwave-app)'},
+    ).timeout(const Duration(seconds: 10));
+    if (r.statusCode != 200) return null;
+    final j = jsonDecode(r.body) as Map;
+    final recs = j['recordings'] as List?;
+    if (recs == null || recs.isEmpty) return null;
+    final rec = recs.first as Map;
+    final foundTitle = rec['title'] as String?;
+    String? foundArtist;
+    final credits = rec['artist-credit'] as List?;
+    if (credits != null && credits.isNotEmpty) {
+      foundArtist = (credits.first as Map)['artist']?['name'] as String?;
+    }
+    String? releaseId;
+    final releases = rec['releases'] as List?;
+    if (releases != null && releases.isNotEmpty) {
+      releaseId = (releases.first as Map)['id'] as String?;
+    }
+    return {'title': foundTitle, 'artist': foundArtist, 'releaseId': releaseId};
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<String?> _fetchItunesArt(String title, String artist) async {
+  try {
+    final q = Uri.encodeComponent('$title $artist');
+    final r = await http.get(
+      Uri.parse('https://itunes.apple.com/search?term=$q&media=music&limit=1'),
+    ).timeout(const Duration(seconds: 10));
+    if (r.statusCode != 200) return null;
+    final j = jsonDecode(r.body) as Map;
+    final results = j['results'] as List?;
+    if (results == null || results.isEmpty) return null;
+    final art = (results.first as Map)['artworkUrl100'] as String?;
+    if (art == null) return null;
+    // get higher res version
+    return art.replaceAll('100x100bb', '600x600bb');
+  } catch (_) {
+    return null;
+  }
+}
+
+// Feature 2b: returns both plain and synced lyrics
+Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist) async {
+  final queries = artist == 'Unknown artist'
+      ? ['https://lrclib.net/api/search?q=${Uri.encodeComponent(title)}']
+      : [
+          'https://lrclib.net/api/search?q=${Uri.encodeComponent('$title $artist')}',
+          'https://lrclib.net/api/search?q=${Uri.encodeComponent(title)}',
+        ];
+  String? foundPlain;
+  String? foundSynced;
+  for (final url in queries) {
+    try {
+      final r = await http.get(Uri.parse(url),
+          headers: {'User-Agent': 'SoundWave/1.0 (soundwave-app)'})
+          .timeout(const Duration(seconds: 10));
+      if (r.statusCode != 200) continue;
+      final list = jsonDecode(r.body) as List?;
+      if (list == null || list.isEmpty) continue;
+      // Pick first item with syncedLyrics
+      if (foundSynced == null) {
+        for (final item in list) {
+          final synced = (item as Map)['syncedLyrics'] as String?;
+          if (synced != null && synced.trim().isNotEmpty) {
+            foundSynced = synced.trim();
+            break;
+          }
+        }
+      }
+      // Pick first item with plainLyrics
+      if (foundPlain == null) {
+        for (final item in list) {
+          final plain = (item as Map)['plainLyrics'] as String?;
+          if (plain != null && plain.trim().isNotEmpty) {
+            foundPlain = plain.trim();
+            break;
+          }
+        }
+      }
+      if (foundPlain != null && foundSynced != null) break;
+    } catch (_) {}
+  }
+  return {'plain': foundPlain, 'synced': foundSynced};
+}
+
+// Feature 2c: LRC parser
+List<({int ms, String line})> parseLrc(String lrc) {
+  final re = RegExp(r'^\[(\d+):(\d+)\.(\d+)\]\s*(.*)');
+  final result = <({int ms, String line})>[];
+  for (final rawLine in lrc.split('\n')) {
+    final m = re.firstMatch(rawLine.trim());
+    if (m == null) continue;
+    final mins = int.parse(m.group(1)!);
+    final secs = int.parse(m.group(2)!);
+    final centis = int.parse(m.group(3)!);
+    final text = m.group(4)!;
+    if (text.trim().isEmpty) continue;
+    final ms = mins * 60000 + secs * 1000 + centis * 10;
+    result.add((ms: ms, line: text));
+  }
+  result.sort((a, b) => a.ms.compareTo(b.ms));
+  return result;
+}
+
 final store = Store();
 
 Future<void> main() async {
@@ -50,14 +168,14 @@ class SoundWaveApp extends StatelessWidget {
 class Song {
   final String id, path;
   String title, artist;
-  String? art;
+  String? art, lyrics, syncedLyrics; // Feature 2a: added syncedLyrics
   int dur;
   bool own;
-  Song(this.id, this.title, this.artist, this.path, {this.art, this.dur = 0, this.own = true});
+  Song(this.id, this.title, this.artist, this.path, {this.art, this.lyrics, this.syncedLyrics, this.dur = 0, this.own = true});
   Map<String, dynamic> toJson() =>
-      {'id': id, 'title': title, 'artist': artist, 'path': path, 'art': art, 'dur': dur, 'own': own};
+      {'id': id, 'title': title, 'artist': artist, 'path': path, 'art': art, 'lyrics': lyrics, 'syncedLyrics': syncedLyrics, 'dur': dur, 'own': own};
   factory Song.fromJson(Map j) =>
-      Song(j['id'], j['title'], j['artist'], j['path'], art: j['art'], dur: j['dur'] ?? 0, own: j['own'] ?? true);
+      Song(j['id'], j['title'], j['artist'], j['path'], art: j['art'], lyrics: j['lyrics'] ?? j['lyricsUrl'], syncedLyrics: j['syncedLyrics'], dur: j['dur'] ?? 0, own: j['own'] ?? true);
 }
 
 class Playlist {
@@ -75,12 +193,15 @@ class Store extends ChangeNotifier {
   Set<String> liked = {};
   List<Playlist> lists = [];
   List<String> folders = [];
+  List<String> recentIds = []; // Feature 1: recently played
   bool shuffle = false, ready = false;
   LoopMode loop = LoopMode.off;
   double speed = 1.0;
   DateTime? sleepAt;
   Timer? _sleep;
-  String? busy;
+  String? busy, updateUrl, updateTag;
+  double? updatePct;
+  bool updating = false;
   late SharedPreferences prefs;
 
   Song? byId(String id) {
@@ -109,9 +230,11 @@ class Store extends ChangeNotifier {
     if (pl != null) lists = (jsonDecode(pl) as List).map((e) => Playlist.fromJson(e as Map)).toList();
     liked = (prefs.getStringList('liked') ?? []).toSet();
     folders = prefs.getStringList('folders') ?? [];
+    recentIds = prefs.getStringList('recents') ?? []; // Feature 1
     ready = true;
     notifyListeners();
     Permission.notification.request();
+    checkUpdate();
   }
 
   void save() {
@@ -119,6 +242,7 @@ class Store extends ChangeNotifier {
     prefs.setString('lists', jsonEncode(lists.map((l) => l.toJson()).toList()));
     prefs.setStringList('liked', liked.toList());
     prefs.setStringList('folders', folders);
+    prefs.setStringList('recents', recentIds); // Feature 1
   }
 
   void like(String id) {
@@ -138,6 +262,66 @@ class Store extends ChangeNotifier {
     touch();
   }
 
+  // ---- in-app updates (from your GitHub releases)
+  Future<void> checkUpdate() async {
+    if (kRepo.isEmpty) return;
+    try {
+      final r = await http
+          .get(Uri.parse('https://api.github.com/repos/$kRepo/releases/latest'),
+              headers: {'Accept': 'application/vnd.github+json'})
+          .timeout(const Duration(seconds: 15));
+      if (r.statusCode != 200) return;
+      final j = jsonDecode(r.body) as Map;
+      final tag = '${j['tag_name']}';
+      final build = int.tryParse(tag.split('.').last) ?? 0;
+      String? url;
+      for (final a in (j['assets'] as List)) {
+        if ('${a['name']}'.endsWith('.apk')) url = '${a['browser_download_url']}';
+      }
+      if (url != null && kBuild > 0 && build > kBuild) {
+        updateUrl = url;
+        updateTag = tag;
+        notifyListeners();
+      }
+    } catch (_) {}
+  }
+
+  Future<String> installUpdate() async {
+    final url = updateUrl;
+    if (url == null || updating) return '';
+    updating = true;
+    updatePct = 0;
+    notifyListeners();
+    try {
+      final client = http.Client();
+      final resp = await client.send(http.Request('GET', Uri.parse(url)));
+      final total = resp.contentLength ?? 0;
+      final file = File(p.join((await getTemporaryDirectory()).path, 'SoundWave-update.apk'));
+      final sink = file.openWrite();
+      var got = 0;
+      await for (final chunk in resp.stream) {
+        sink.add(chunk);
+        got += chunk.length;
+        if (total > 0) {
+          updatePct = got / total;
+          notifyListeners();
+        }
+      }
+      await sink.close();
+      client.close();
+      updating = false;
+      updatePct = null;
+      notifyListeners();
+      await OpenFilex.open(file.path, type: 'application/vnd.android.package-archive');
+      return '';
+    } catch (_) {
+      updating = false;
+      updatePct = null;
+      notifyListeners();
+      return 'Update failed. Check your connection and try again.';
+    }
+  }
+
   // ---- tags + album art
   Future<String> _saveArt(String id, List<int> bytes) async {
     final dir = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'art'));
@@ -147,15 +331,50 @@ class Store extends ChangeNotifier {
     return f.path;
   }
 
+  static final _siteJunkRe = RegExp(
+      r'\s*\(?(mp3\.pm|SpotiDownloader\.com|ytmp3\.cc|y2mate|tubidy|mp3juice|320kbps|fakaza|skull|beemp3s?|downloadming|djjohal|songspk|pagalworld|mrjatt|mp3paw|audiomack\.com|soundcloud\.com)\)?\s*',
+      caseSensitive: false);
+
+  static String _cleanTitle(String raw) =>
+      raw.trim().replaceAll(_siteJunkRe, '').trim();
+
   Future<void> _applyTags(Song s) async {
     try {
       final m = md.readMetadata(File(s.path), getImage: true);
-      if ((m.title ?? '').trim().isNotEmpty) s.title = m.title!.trim();
+      if ((m.title ?? '').trim().isNotEmpty) s.title = _cleanTitle(m.title!);
       if ((m.artist ?? '').trim().isNotEmpty) s.artist = m.artist!.trim();
       final d = m.duration;
       if (d != null) s.dur = d.inMilliseconds;
       if (m.pictures.isNotEmpty) s.art = await _saveArt(s.id, m.pictures.first.bytes);
     } catch (_) {}
+  }
+
+  Future<void> _enrich(Song s) async {
+    final rawBasename = p.basenameWithoutExtension(s.path).replaceAll('_', ' ').trim();
+    final cleanedBasename = _cleanTitle(rawBasename);
+    final needsMeta = s.artist == 'Unknown artist' ||
+        s.title == rawBasename ||
+        s.title == cleanedBasename;
+    if (needsMeta) {
+      final mb = await _lookupMusicBrainz(s.title, s.artist);
+      if (mb != null) {
+        if ((mb['title'] ?? '').isNotEmpty) s.title = mb['title']!;
+        if ((mb['artist'] ?? '').isNotEmpty) s.artist = mb['artist']!;
+      }
+    }
+    if (s.art == null) {
+      final artUrl = await _fetchItunesArt(s.title, s.artist);
+      if (artUrl != null) {
+        try {
+          final r = await http.get(Uri.parse(artUrl)).timeout(const Duration(seconds: 10));
+          if (r.statusCode == 200) s.art = await _saveArt(s.id, r.bodyBytes);
+        } catch (_) {}
+      }
+    }
+    // Feature 2b: fetch both plain and synced lyrics
+    final lyricsMap = await _fetchLrcLibLyrics(s.title, s.artist);
+    if (lyricsMap['plain'] != null) s.lyrics = lyricsMap['plain'];
+    if (lyricsMap['synced'] != null) s.syncedLyrics = lyricsMap['synced'];
   }
 
   Future<String> refreshTags() async {
@@ -169,6 +388,8 @@ class Store extends ChangeNotifier {
     touch();
     return 'Album art refreshed';
   }
+
+
 
   // ---- importing
   Future<int> _import(List<MapEntry<String, String>> items, bool own) async {
@@ -187,7 +408,7 @@ class Store extends ChangeNotifier {
         path = p.join(dir.path, '$id${p.extension(src)}');
         await File(src).copy(path);
       }
-      var title = p.basenameWithoutExtension(items[i].value).replaceAll('_', ' ').trim();
+      var title = _cleanTitle(p.basenameWithoutExtension(items[i].value).replaceAll('_', ' '));
       var artist = 'Unknown artist';
       final parts = title.split(' - ');
       if (parts.length > 1) {
@@ -196,6 +417,7 @@ class Store extends ChangeNotifier {
       }
       final s = Song(id, title, artist, path, own: own);
       await _applyTags(s);
+      await _enrich(s);
       songs.insert(0, s);
       n++;
     }
@@ -259,6 +481,7 @@ class Store extends ChangeNotifier {
     } catch (_) {}
     songs.removeWhere((x) => x.id == s.id);
     liked.remove(s.id);
+    recentIds.remove(s.id); // Feature 1: clean up recents
     for (final l in lists) {
       l.ids.remove(s.id);
     }
@@ -268,6 +491,16 @@ class Store extends ChangeNotifier {
   // ---- playback
   Future<void> play(List<Song> list, int i) async {
     queue = list;
+    // Auto-enrich on play if artist unknown or lyrics missing
+    final s = list[i];
+    if (s.artist == 'Unknown artist' || s.lyrics == null) {
+      _enrich(s).then((_) { save(); notifyListeners(); });
+    }
+    // Feature 1: track recently played
+    final playedId = list[i].id;
+    recentIds.remove(playedId);
+    recentIds.insert(0, playedId);
+    if (recentIds.length > 10) recentIds = recentIds.sublist(0, 10);
     notifyListeners();
     await player.setAudioSource(
       ConcatenatingAudioSource(children: [
@@ -510,6 +743,7 @@ class _HomeState extends State<Home> {
     Widget? back,
     Widget? menu,
     String empty = '',
+    Widget? body, // Feature 1: optional custom body to replace the default ListView
   }) {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Padding(
@@ -552,12 +786,12 @@ class _HomeState extends State<Home> {
             child: Text('${list.length} songs', style: const TextStyle(color: Colors.white54))),
       ]),
       Expanded(
-        child: list.isEmpty
+        child: body ?? (list.isEmpty
             ? Center(
                 child: Padding(
                     padding: const EdgeInsets.all(24),
                     child: Text(empty, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white54))))
-            : ListView.builder(itemCount: list.length, itemBuilder: (c, i) => _tile(list, i, cur, pl)),
+            : ListView.builder(itemCount: list.length, itemBuilder: (c, i) => _tile(list, i, cur, pl))),
       ),
     ]);
   }
@@ -571,7 +805,7 @@ class _HomeState extends State<Home> {
             _run(store.scanFolder());
           } else if (v == 'rescan') {
             _run(store.rescan());
-          } else {
+          } else if (v == 'tags') {
             _run(store.refreshTags());
           }
         },
@@ -758,19 +992,62 @@ class _HomeState extends State<Home> {
     );
   }
 
+  // Feature 1: Library tab body with recently played section
+  Widget _libraryBody(String? cur) {
+    final allSongs = store.songs;
+    if (q.isNotEmpty) {
+      // Search mode: filter as before
+      final k = q.toLowerCase();
+      final filtered = allSongs.where((s) => '${s.title} ${s.artist}'.toLowerCase().contains(k)).toList();
+      return ListView.builder(itemCount: filtered.length, itemBuilder: (c, i) => _tile(filtered, i, cur, null));
+    }
+    // Empty search: show recents + all songs
+    final recentSongs = store.recentIds
+        .map(store.byId)
+        .whereType<Song>()
+        .toList();
+    return ListView(children: [
+      if (recentSongs.isNotEmpty) ...[
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
+          child: Text('Recently played', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white70)),
+        ),
+        for (var i = 0; i < recentSongs.length; i++)
+          _tile(recentSongs, i, cur, null),
+        const Divider(color: Colors.white12, height: 24),
+      ],
+      const Padding(
+        padding: EdgeInsets.fromLTRB(16, 4, 16, 4),
+        child: Text('All songs', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white70)),
+      ),
+      if (allSongs.isEmpty)
+        const Padding(
+          padding: EdgeInsets.all(24),
+          child: Text('Tap + to add songs or scan a folder', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54)),
+        )
+      else
+        for (var i = 0; i < allSongs.length; i++)
+          _tile(allSongs, i, cur, null),
+    ]);
+  }
+
   Widget _page(String? cur) {
     switch (tab) {
       case 0:
         return _home(cur);
       case 1:
         final k = q.toLowerCase();
+        final displayList = q.isEmpty
+            ? store.songs
+            : store.songs.where((s) => '${s.title} ${s.artist}'.toLowerCase().contains(k)).toList();
         return _songPage(
           title: 'Your Library',
-          list: store.songs.where((s) => '${s.title} ${s.artist}'.toLowerCase().contains(k)).toList(),
+          list: displayList,
           cur: cur,
           search: true,
           menu: _libMenu(),
           empty: 'Tap + to add songs or scan a folder',
+          body: _libraryBody(cur), // Feature 1: custom body
         );
       case 2:
         return openPl == null ? _playlists() : _plDetail(cur);
@@ -812,6 +1089,22 @@ class _HomeState extends State<Home> {
                     padding: const EdgeInsets.all(8),
                     child: Text(store.busy!, style: const TextStyle(color: Colors.black, fontWeight: FontWeight.w600)),
                   ),
+                if (store.updateUrl != null)
+                  Material(
+                    color: const Color(0xFF2A2A2A),
+                    child: ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.system_update, color: green),
+                      title: Text(store.updating ? 'Downloading update…' : 'Update available (${store.updateTag})'),
+                      subtitle: store.updating ? LinearProgressIndicator(value: store.updatePct) : null,
+                      trailing: store.updating
+                          ? null
+                          : FilledButton(
+                              style: FilledButton.styleFrom(backgroundColor: green, foregroundColor: Colors.black),
+                              onPressed: () => _run(store.installUpdate()),
+                              child: const Text('Update')),
+                    ),
+                  ),
                 Expanded(
                   child: StreamBuilder<int?>(
                     stream: player.currentIndexStream,
@@ -822,25 +1115,23 @@ class _HomeState extends State<Home> {
                     },
                   ),
                 ),
+                const MiniPlayer(),
               ]),
             ),
-            bottomNavigationBar: Column(mainAxisSize: MainAxisSize.min, children: [
-              const MiniPlayer(),
-              NavigationBar(
-                selectedIndex: tab,
-                onDestinationSelected: (i) => setState(() {
-                  tab = i;
-                  openPl = null;
-                  q = '';
-                }),
-                destinations: const [
-                  NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
-                  NavigationDestination(icon: Icon(Icons.library_music_outlined), selectedIcon: Icon(Icons.library_music), label: 'Library'),
-                  NavigationDestination(icon: Icon(Icons.queue_music_outlined), selectedIcon: Icon(Icons.queue_music), label: 'Playlists'),
-                  NavigationDestination(icon: Icon(Icons.favorite_border), selectedIcon: Icon(Icons.favorite), label: 'Liked'),
-                ],
-              ),
-            ]),
+            bottomNavigationBar: NavigationBar(
+              selectedIndex: tab,
+              onDestinationSelected: (i) => setState(() {
+                tab = i;
+                openPl = null;
+                q = '';
+              }),
+              destinations: const [
+                NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
+                NavigationDestination(icon: Icon(Icons.library_music_outlined), selectedIcon: Icon(Icons.library_music), label: 'Library'),
+                NavigationDestination(icon: Icon(Icons.queue_music_outlined), selectedIcon: Icon(Icons.queue_music), label: 'Playlists'),
+                NavigationDestination(icon: Icon(Icons.favorite_border), selectedIcon: Icon(Icons.favorite), label: 'Liked'),
+              ],
+            ),
           ),
         );
       },
@@ -908,6 +1199,7 @@ class MiniPlayer extends StatelessWidget {
     );
   }
 }
+
 
 class NowPlaying extends StatelessWidget {
   const NowPlaying({super.key});
@@ -990,16 +1282,17 @@ class NowPlaying extends StatelessWidget {
                         onPressed: store.cycleLoop),
                   ]),
                   const SizedBox(height: 8),
-                  Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  Wrap(alignment: WrapAlignment.center, spacing: 8, runSpacing: 8, children: [
                     ActionChip(
                         avatar: const Icon(Icons.speed, size: 18),
                         label: Text('${store.speed}x'),
                         onPressed: () => pickSpeed(context)),
-                    const SizedBox(width: 12),
                     ActionChip(
                         avatar: const Icon(Icons.bedtime_outlined, size: 18),
-                        label: Text(sleep == null ? 'Sleep timer' : 'Sleep in ~${sleep.difference(DateTime.now()).inMinutes + 1}m'),
+                        label: Text(sleep == null ? 'Sleep timer' : '~${sleep.difference(DateTime.now()).inMinutes + 1}m'),
                         onPressed: () => pickSleep(context)),
+                    // Feature 3: always show lyrics chip; fetch on demand if not loaded
+                    _LyricsChip(s: s),
                   ]),
                 ]),
               ),
@@ -1007,6 +1300,192 @@ class NowPlaying extends StatelessWidget {
           );
         },
       ),
+    );
+  }
+}
+
+// Feature 3: Lyrics chip — always visible; fetches on demand if lyrics not loaded yet
+class _LyricsChip extends StatefulWidget {
+  final Song s;
+  const _LyricsChip({required this.s});
+  @override
+  State<_LyricsChip> createState() => _LyricsChipState();
+}
+
+class _LyricsChipState extends State<_LyricsChip> {
+  bool _fetching = false;
+
+  Future<void> _fetchAndOpen() async {
+    final s = widget.s;
+    // If already loaded, open straight away
+    if (s.lyrics != null || s.syncedLyrics != null) {
+      _open(s);
+      return;
+    }
+    // Fetch now
+    setState(() => _fetching = true);
+    final map = await _fetchLrcLibLyrics(s.title, s.artist);
+    if (map['plain'] != null) s.lyrics = map['plain'];
+    if (map['synced'] != null) s.syncedLyrics = map['synced'];
+    store.save();
+    store.ping();
+    if (!mounted) return;
+    setState(() => _fetching = false);
+    if (s.lyrics == null && s.syncedLyrics == null) {
+      snack(context, 'No lyrics found for "${s.title}"');
+      return;
+    }
+    _open(s);
+  }
+
+  void _open(Song s) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: true,
+      backgroundColor: const Color(0xFF1A1A1A),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => LyricsSheet(s: s),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ActionChip(
+      avatar: _fetching
+          ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2, color: green))
+          : const Icon(Icons.lyrics_outlined, size: 18),
+      label: const Text('Lyrics'),
+      onPressed: _fetching ? null : _fetchAndOpen,
+    );
+  }
+}
+
+// Feature 3: Synced lyrics sheet
+class LyricsSheet extends StatefulWidget {
+  final Song s;
+  const LyricsSheet({super.key, required this.s});
+  @override
+  State<LyricsSheet> createState() => _LyricsSheetState();
+}
+
+class _LyricsSheetState extends State<LyricsSheet> {
+  late final ScrollController _sc;
+  late final List<({int ms, String line})> _lines;
+  late final bool _isSynced;
+  static const double _lineHeight = 44.0;
+
+  @override
+  void initState() {
+    super.initState();
+    _sc = ScrollController();
+    _isSynced = widget.s.syncedLyrics != null;
+    _lines = _isSynced ? parseLrc(widget.s.syncedLyrics!) : [];
+  }
+
+  @override
+  void dispose() {
+    _sc.dispose();
+    super.dispose();
+  }
+
+  void _scrollToLine(int idx) {
+    if (!_sc.hasClients) return;
+    final offset = idx * _lineHeight;
+    final viewportHeight = _sc.position.viewportDimension;
+    final target = offset - viewportHeight / 2 + _lineHeight / 2;
+    _sc.animateTo(
+      target.clamp(0.0, _sc.position.maxScrollExtent),
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOut,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.6,
+      maxChildSize: 0.92,
+      minChildSize: 0.3,
+      builder: (_, sheetSc) => Column(children: [
+        // Header
+        const SizedBox(height: 12),
+        Container(
+          width: 40,
+          height: 4,
+          decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
+        ),
+        const SizedBox(height: 8),
+        // Close button row
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(children: [
+            const Spacer(),
+            IconButton(
+              icon: const Icon(Icons.close, color: Colors.white54),
+              onPressed: () => Navigator.of(context).pop(),
+            ),
+          ]),
+        ),
+        Text(widget.s.title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        Text(widget.s.artist, style: const TextStyle(color: Colors.white54, fontSize: 13)),
+        const Divider(height: 24, color: Colors.white12),
+        // Lyrics body
+        Expanded(
+          child: _isSynced
+              ? StreamBuilder<Duration>(
+                  stream: player.positionStream,
+                  builder: (ctx, snap) {
+                    final posMs = snap.data?.inMilliseconds ?? 0;
+                    // Find current line: last line whose ms <= posMs
+                    var curIdx = -1;
+                    for (var i = 0; i < _lines.length; i++) {
+                      if (_lines[i].ms <= posMs) curIdx = i;
+                    }
+                    // Auto-scroll after frame
+                    if (curIdx >= 0) {
+                      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToLine(curIdx));
+                    }
+                    return ListView.builder(
+                      controller: _sc,
+                      padding: const EdgeInsets.fromLTRB(24, 0, 24, 32),
+                      itemCount: _lines.length,
+                      itemBuilder: (c, i) {
+                        final isCur = i == curIdx;
+                        return SizedBox(
+                          height: _lineHeight,
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              _lines[i].line,
+                              style: TextStyle(
+                                fontSize: isCur ? 17 : 15,
+                                fontWeight: isCur ? FontWeight.bold : FontWeight.normal,
+                                color: isCur ? Colors.white : Colors.white54,
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    );
+                  },
+                )
+              : SingleChildScrollView(
+                  controller: _sc,
+                  padding: const EdgeInsets.fromLTRB(24, 0, 24, 32),
+                  child: Text(
+                    widget.s.lyrics ?? '',
+                    style: const TextStyle(fontSize: 15, height: 1.8, color: Colors.white70),
+                  ),
+                ),
+        ),
+      ]),
     );
   }
 }
