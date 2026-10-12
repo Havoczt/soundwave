@@ -20,7 +20,6 @@ const kRepo = String.fromEnvironment('REPO');
 const kBuild = int.fromEnvironment('BUILD', defaultValue: 0);
 final player = AudioPlayer();
 
-// ---- metadata enrichment helpers
 Future<Map<String, String?>?> _lookupMusicBrainz(String title, String artist) async {
   try {
     final q = Uri.encodeComponent(
@@ -63,21 +62,21 @@ Future<String?> _fetchItunesArt(String title, String artist) async {
     if (results == null || results.isEmpty) return null;
     final art = (results.first as Map)['artworkUrl100'] as String?;
     if (art == null) return null;
-    // get higher res version
     return art.replaceAll('100x100bb', '600x600bb');
   } catch (_) {
     return null;
   }
 }
 
-Future<String?> _fetchLrcLibLyrics(String title, String artist) async {
-  // Try with artist first, then fall back to title-only if artist is unknown
+Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist) async {
   final queries = artist == 'Unknown artist'
       ? ['https://lrclib.net/api/search?q=${Uri.encodeComponent(title)}']
       : [
           'https://lrclib.net/api/search?q=${Uri.encodeComponent('$title $artist')}',
           'https://lrclib.net/api/search?q=${Uri.encodeComponent(title)}',
         ];
+  String? foundPlain;
+  String? foundSynced;
   for (final url in queries) {
     try {
       final r = await http.get(Uri.parse(url),
@@ -86,26 +85,46 @@ Future<String?> _fetchLrcLibLyrics(String title, String artist) async {
       if (r.statusCode != 200) continue;
       final list = jsonDecode(r.body) as List?;
       if (list == null || list.isEmpty) continue;
-      // Prefer plain lyrics; fall back to synced lyrics stripped of timestamps
-      for (final item in list) {
-        final plain = (item as Map)['plainLyrics'] as String?;
-        if (plain != null && plain.trim().isNotEmpty) return plain.trim();
-      }
-      for (final item in list) {
-        final synced = (item as Map)['syncedLyrics'] as String?;
-        if (synced != null && synced.trim().isNotEmpty) {
-          // Strip [mm:ss.xx] timestamps
-          final plain = synced
-              .split('\n')
-              .map((l) => l.replaceFirst(RegExp(r'^\[\d+:\d+\.\d+\]\s*'), ''))
-              .where((l) => l.trim().isNotEmpty)
-              .join('\n');
-          if (plain.isNotEmpty) return plain;
+      if (foundSynced == null) {
+        for (final item in list) {
+          final synced = (item as Map)['syncedLyrics'] as String?;
+          if (synced != null && synced.trim().isNotEmpty) {
+            foundSynced = synced.trim();
+            break;
+          }
         }
       }
+      if (foundPlain == null) {
+        for (final item in list) {
+          final plain = (item as Map)['plainLyrics'] as String?;
+          if (plain != null && plain.trim().isNotEmpty) {
+            foundPlain = plain.trim();
+            break;
+          }
+        }
+      }
+      if (foundPlain != null && foundSynced != null) break;
     } catch (_) {}
   }
-  return null;
+  return {'plain': foundPlain, 'synced': foundSynced};
+}
+
+List<({int ms, String line})> parseLrc(String lrc) {
+  final re = RegExp(r'^\[(\d+):(\d+)\.(\d+)\]\s*(.*)');
+  final result = <({int ms, String line})>[];
+  for (final rawLine in lrc.split('\n')) {
+    final m = re.firstMatch(rawLine.trim());
+    if (m == null) continue;
+    final mins = int.parse(m.group(1)!);
+    final secs = int.parse(m.group(2)!);
+    final centis = int.parse(m.group(3)!);
+    final text = m.group(4)!;
+    if (text.trim().isEmpty) continue;
+    final ms = mins * 60000 + secs * 1000 + centis * 10;
+    result.add((ms: ms, line: text));
+  }
+  result.sort((a, b) => a.ms.compareTo(b.ms));
+  return result;
 }
 
 final store = Store();
@@ -138,19 +157,17 @@ class SoundWaveApp extends StatelessWidget {
         home: const Home(),
       );
 }
-
-// ---------------------------------------------------------------- models
 class Song {
   final String id, path;
   String title, artist;
-  String? art, lyrics;
+  String? art, lyrics, syncedLyrics;
   int dur;
   bool own;
-  Song(this.id, this.title, this.artist, this.path, {this.art, this.lyrics, this.dur = 0, this.own = true});
+  Song(this.id, this.title, this.artist, this.path, {this.art, this.lyrics, this.syncedLyrics, this.dur = 0, this.own = true});
   Map<String, dynamic> toJson() =>
-      {'id': id, 'title': title, 'artist': artist, 'path': path, 'art': art, 'lyrics': lyrics, 'dur': dur, 'own': own};
+      {'id': id, 'title': title, 'artist': artist, 'path': path, 'art': art, 'lyrics': lyrics, 'syncedLyrics': syncedLyrics, 'dur': dur, 'own': own};
   factory Song.fromJson(Map j) =>
-      Song(j['id'], j['title'], j['artist'], j['path'], art: j['art'], lyrics: j['lyrics'] ?? j['lyricsUrl'], dur: j['dur'] ?? 0, own: j['own'] ?? true);
+      Song(j['id'], j['title'], j['artist'], j['path'], art: j['art'], lyrics: j['lyrics'] ?? j['lyricsUrl'], syncedLyrics: j['syncedLyrics'], dur: j['dur'] ?? 0, own: j['own'] ?? true);
 }
 
 class Playlist {
@@ -162,12 +179,12 @@ class Playlist {
   factory Playlist.fromJson(Map j) => Playlist(j['id'], j['name'], List<String>.from(j['ids']));
 }
 
-// ---------------------------------------------------------------- store
 class Store extends ChangeNotifier {
   List<Song> songs = [], queue = [];
   Set<String> liked = {};
   List<Playlist> lists = [];
   List<String> folders = [];
+  List<String> recentIds = [];
   bool shuffle = false, ready = false;
   LoopMode loop = LoopMode.off;
   double speed = 1.0;
@@ -179,17 +196,12 @@ class Store extends ChangeNotifier {
   late SharedPreferences prefs;
 
   Song? byId(String id) {
-    for (final s in songs) {
-      if (s.id == id) return s;
-    }
+    for (final s in songs) { if (s.id == id) return s; }
     return null;
   }
 
   void ping() => notifyListeners();
-  void touch() {
-    save();
-    notifyListeners();
-  }
+  void touch() { save(); notifyListeners(); }
 
   Future<void> load() async {
     prefs = await SharedPreferences.getInstance();
@@ -204,6 +216,7 @@ class Store extends ChangeNotifier {
     if (pl != null) lists = (jsonDecode(pl) as List).map((e) => Playlist.fromJson(e as Map)).toList();
     liked = (prefs.getStringList('liked') ?? []).toSet();
     folders = prefs.getStringList('folders') ?? [];
+    recentIds = prefs.getStringList('recents') ?? [];
     ready = true;
     notifyListeners();
     Permission.notification.request();
@@ -215,6 +228,7 @@ class Store extends ChangeNotifier {
     prefs.setString('lists', jsonEncode(lists.map((l) => l.toJson()).toList()));
     prefs.setStringList('liked', liked.toList());
     prefs.setStringList('folders', folders);
+    prefs.setStringList('recents', recentIds);
   }
 
   void like(String id) {
@@ -234,7 +248,6 @@ class Store extends ChangeNotifier {
     touch();
   }
 
-  // ---- in-app updates (from your GitHub releases)
   Future<void> checkUpdate() async {
     if (kRepo.isEmpty) return;
     try {
@@ -274,10 +287,7 @@ class Store extends ChangeNotifier {
       await for (final chunk in resp.stream) {
         sink.add(chunk);
         got += chunk.length;
-        if (total > 0) {
-          updatePct = got / total;
-          notifyListeners();
-        }
+        if (total > 0) { updatePct = got / total; notifyListeners(); }
       }
       await sink.close();
       client.close();
@@ -294,7 +304,6 @@ class Store extends ChangeNotifier {
     }
   }
 
-  // ---- tags + album art
   Future<String> _saveArt(String id, List<int> bytes) async {
     final dir = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'art'));
     await dir.create(recursive: true);
@@ -317,7 +326,6 @@ class Store extends ChangeNotifier {
   Future<void> _enrich(Song s) async {
     final needsMeta = s.artist == 'Unknown artist' ||
         s.title == p.basenameWithoutExtension(s.path).replaceAll('_', ' ').trim();
-    // Always try to get lyrics URL; only fetch full meta if tags are missing
     if (needsMeta) {
       final mb = await _lookupMusicBrainz(s.title, s.artist);
       if (mb != null) {
@@ -325,7 +333,6 @@ class Store extends ChangeNotifier {
         if ((mb['artist'] ?? '').isNotEmpty) s.artist = mb['artist']!;
       }
     }
-    // Fetch album art from iTunes if not already set
     if (s.art == null) {
       final artUrl = await _fetchItunesArt(s.title, s.artist);
       if (artUrl != null) {
@@ -335,9 +342,9 @@ class Store extends ChangeNotifier {
         } catch (_) {}
       }
     }
-    // Fetch lyrics from LRCLib
-    final lyrics = await _fetchLrcLibLyrics(s.title, s.artist);
-    if (lyrics != null) s.lyrics = lyrics;
+    final lyricsMap = await _fetchLrcLibLyrics(s.title, s.artist);
+    if (lyricsMap['plain'] != null) s.lyrics = lyricsMap['plain'];
+    if (lyricsMap['synced'] != null) s.syncedLyrics = lyricsMap['synced'];
   }
 
   Future<String> refreshTags() async {
@@ -352,9 +359,6 @@ class Store extends ChangeNotifier {
     return 'Album art refreshed';
   }
 
-
-
-  // ---- importing
   Future<int> _import(List<MapEntry<String, String>> items, bool own) async {
     final dir = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'music'));
     await dir.create(recursive: true);
@@ -399,10 +403,7 @@ class Store extends ChangeNotifier {
 
   Future<String> scanFolder() async {
     final ok = (await Permission.audio.request()).isGranted || (await Permission.storage.request()).isGranted;
-    if (!ok) {
-      openAppSettings();
-      return 'Allow "Music and audio" access for SoundWave, then try again';
-    }
+    if (!ok) { openAppSettings(); return 'Allow "Music and audio" access for SoundWave, then try again'; }
     final dir = await FilePicker.platform.getDirectoryPath();
     if (dir == null) return '';
     if (!folders.contains(dir)) folders.add(dir);
@@ -426,11 +427,7 @@ class Store extends ChangeNotifier {
       } catch (_) {}
     }
     found.removeWhere((e) => songs.any((s) => s.path == e.key));
-    if (found.isEmpty) {
-      busy = null;
-      touch();
-      return 'No new songs found';
-    }
+    if (found.isEmpty) { busy = null; touch(); return 'No new songs found'; }
     final n = await _import(found, false);
     return 'Added $n song${n == 1 ? '' : 's'}';
   }
@@ -444,15 +441,21 @@ class Store extends ChangeNotifier {
     } catch (_) {}
     songs.removeWhere((x) => x.id == s.id);
     liked.remove(s.id);
-    for (final l in lists) {
-      l.ids.remove(s.id);
-    }
+    recentIds.remove(s.id);
+    for (final l in lists) { l.ids.remove(s.id); }
     touch();
   }
 
-  // ---- playback
   Future<void> play(List<Song> list, int i) async {
     queue = list;
+    final s = list[i];
+    if (s.artist == 'Unknown artist' || s.lyrics == null) {
+      _enrich(s).then((_) { save(); notifyListeners(); });
+    }
+    final playedId = list[i].id;
+    recentIds.remove(playedId);
+    recentIds.insert(0, playedId);
+    if (recentIds.length > 10) recentIds = recentIds.sublist(0, 10);
     notifyListeners();
     await player.setAudioSource(
       ConcatenatingAudioSource(children: [
@@ -486,11 +489,7 @@ class Store extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setSpeed(double v) {
-    speed = v;
-    player.setSpeed(v);
-    notifyListeners();
-  }
+  void setSpeed(double v) { speed = v; player.setSpeed(v); notifyListeners(); }
 
   void setSleep(int? mins) {
     _sleep?.cancel();
@@ -506,13 +505,9 @@ class Store extends ChangeNotifier {
     notifyListeners();
   }
 }
-
-// ---------------------------------------------------------------- helpers
 Color _col(String s) {
   var h = 0;
-  for (final r in s.runes) {
-    h = (h * 31 + r) % 360;
-  }
+  for (final r in s.runes) { h = (h * 31 + r) % 360; }
   return HSLColor.fromAHSL(1, h.toDouble(), .55, .35).toColor();
 }
 
@@ -577,10 +572,7 @@ void pickSpeed(BuildContext c) {
           ListTile(
             title: Text('${v}x'),
             trailing: store.speed == v ? const Icon(Icons.check, color: green) : null,
-            onTap: () {
-              store.setSpeed(v);
-              Navigator.pop(d);
-            },
+            onTap: () { store.setSpeed(v); Navigator.pop(d); },
           ),
       ]),
     ),
@@ -595,10 +587,7 @@ void pickSleep(BuildContext c) {
         for (final m in <int?>[null, 5, 15, 30, 45, 60])
           ListTile(
             title: Text(m == null ? 'Off' : '$m minutes'),
-            onTap: () {
-              store.setSleep(m);
-              Navigator.pop(d);
-            },
+            onTap: () { store.setSleep(m); Navigator.pop(d); },
           ),
       ]),
     ),
@@ -612,8 +601,7 @@ class Art extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ph = Container(
-      width: size,
-      height: size,
+      width: size, height: size,
       decoration: BoxDecoration(color: _col(s.title), borderRadius: BorderRadius.circular(radius)),
       child: Icon(Icons.music_note, color: Colors.white70, size: size * .5),
     );
@@ -621,18 +609,13 @@ class Art extends StatelessWidget {
     if (a == null || !File(a).existsSync()) return ph;
     return ClipRRect(
       borderRadius: BorderRadius.circular(radius),
-      child: Image.file(File(a),
-          width: size,
-          height: size,
-          fit: BoxFit.cover,
-          cacheWidth: (size * 2).round(),
-          gaplessPlayback: true,
+      child: Image.file(File(a), width: size, height: size, fit: BoxFit.cover,
+          cacheWidth: (size * 2).round(), gaplessPlayback: true,
           errorBuilder: (_, __, ___) => ph),
     );
   }
 }
 
-// ---------------------------------------------------------------- home
 class Home extends StatefulWidget {
   const Home({super.key});
   @override
@@ -654,9 +637,7 @@ class _HomeState extends State<Home> {
     final on = s.id == cur, lk = store.liked.contains(s.id);
     return ListTile(
       leading: Art(s, 48),
-      title: Text(s.title,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
+      title: Text(s.title, maxLines: 1, overflow: TextOverflow.ellipsis,
           style: TextStyle(color: on ? green : Colors.white, fontWeight: FontWeight.w600)),
       subtitle: Text(s.artist, maxLines: 1, overflow: TextOverflow.ellipsis),
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -695,17 +676,15 @@ class _HomeState extends State<Home> {
     Widget? back,
     Widget? menu,
     String empty = '',
+    Widget? body,
   }) {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Padding(
         padding: const EdgeInsets.fromLTRB(8, 12, 8, 4),
         child: Row(children: [
           if (back != null) back else const SizedBox(width: 8),
-          Expanded(
-              child: Text(title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800))),
+          Expanded(child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800))),
           if (menu != null) menu,
         ]),
       ),
@@ -730,19 +709,18 @@ class _HomeState extends State<Home> {
             icon: const Icon(Icons.play_arrow),
             onPressed: list.isEmpty ? null : () => store.play(list, 0)),
         IconButton(
-            icon: Icon(Icons.shuffle, color: store.shuffle ? green : Colors.white70), onPressed: store.toggleShuffle),
+            icon: Icon(Icons.shuffle, color: store.shuffle ? green : Colors.white70),
+            onPressed: store.toggleShuffle),
         const Spacer(),
         Padding(
             padding: const EdgeInsets.only(right: 16),
             child: Text('${list.length} songs', style: const TextStyle(color: Colors.white54))),
       ]),
       Expanded(
-        child: list.isEmpty
-            ? Center(
-                child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Text(empty, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white54))))
-            : ListView.builder(itemCount: list.length, itemBuilder: (c, i) => _tile(list, i, cur, pl)),
+        child: body ?? (list.isEmpty
+            ? Center(child: Padding(padding: const EdgeInsets.all(24),
+                child: Text(empty, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white54))))
+            : ListView.builder(itemCount: list.length, itemBuilder: (c, i) => _tile(list, i, cur, pl))),
       ),
     ]);
   }
@@ -750,15 +728,10 @@ class _HomeState extends State<Home> {
   Widget _libMenu() => PopupMenuButton<String>(
         icon: const Icon(Icons.add_circle_outline, size: 28),
         onSelected: (v) {
-          if (v == 'add') {
-            _run(store.addPicked());
-          } else if (v == 'scan') {
-            _run(store.scanFolder());
-          } else if (v == 'rescan') {
-            _run(store.rescan());
-          } else if (v == 'tags') {
-            _run(store.refreshTags());
-          }
+          if (v == 'add') _run(store.addPicked());
+          else if (v == 'scan') _run(store.scanFolder());
+          else if (v == 'rescan') _run(store.rescan());
+          else if (v == 'tags') _run(store.refreshTags());
         },
         itemBuilder: (_) => const [
           PopupMenuItem(value: 'add', child: Text('Add songs')),
@@ -777,12 +750,9 @@ class _HomeState extends State<Home> {
       const SizedBox(height: 16),
       if (songs.isNotEmpty)
         GridView.count(
-          crossAxisCount: 2,
-          shrinkWrap: true,
+          crossAxisCount: 2, shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
-          childAspectRatio: 3.1,
-          crossAxisSpacing: 8,
-          mainAxisSpacing: 8,
+          childAspectRatio: 3.1, crossAxisSpacing: 8, mainAxisSpacing: 8,
           children: [
             for (var i = 0; i < min(6, songs.length); i++)
               InkWell(
@@ -794,14 +764,9 @@ class _HomeState extends State<Home> {
                   child: Row(children: [
                     Art(songs[i], 56, radius: 0),
                     const SizedBox(width: 10),
-                    Expanded(
-                        child: Text(songs[i].title,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w700,
-                                color: songs[i].id == cur ? green : Colors.white))),
+                    Expanded(child: Text(songs[i].title, maxLines: 2, overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                            color: songs[i].id == cur ? green : Colors.white))),
                     const SizedBox(width: 6),
                   ]),
                 ),
@@ -810,28 +775,21 @@ class _HomeState extends State<Home> {
         ),
       const SizedBox(height: 20),
       Row(children: [
-        Expanded(
-          child: FilledButton.icon(
-              style: FilledButton.styleFrom(
-                  backgroundColor: green, foregroundColor: Colors.black, minimumSize: const Size(0, 50)),
-              onPressed: () => _run(store.addPicked()),
-              icon: const Icon(Icons.add),
-              label: const Text('Add songs', style: TextStyle(fontWeight: FontWeight.w700))),
-        ),
+        Expanded(child: FilledButton.icon(
+            style: FilledButton.styleFrom(backgroundColor: green, foregroundColor: Colors.black, minimumSize: const Size(0, 50)),
+            onPressed: () => _run(store.addPicked()),
+            icon: const Icon(Icons.add),
+            label: const Text('Add songs', style: TextStyle(fontWeight: FontWeight.w700)))),
         const SizedBox(width: 10),
-        Expanded(
-          child: OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(minimumSize: const Size(0, 50)),
-              onPressed: () => _run(store.scanFolder()),
-              icon: const Icon(Icons.folder_open),
-              label: const Text('Scan folder')),
-        ),
+        Expanded(child: OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(minimumSize: const Size(0, 50)),
+            onPressed: () => _run(store.scanFolder()),
+            icon: const Icon(Icons.folder_open),
+            label: const Text('Scan folder'))),
       ]),
       if (songs.isEmpty)
-        const Padding(
-            padding: EdgeInsets.only(top: 24),
-            child: Text(
-                'Your library is empty. Add songs, or scan a folder like Music or Download to import everything in it.',
+        const Padding(padding: EdgeInsets.only(top: 24),
+            child: Text('Your library is empty. Add songs, or scan a folder like Music or Download to import everything in it.',
                 style: TextStyle(color: Colors.white70))),
       if (songs.length > 6) ...[
         const SizedBox(height: 24),
@@ -845,15 +803,12 @@ class _HomeState extends State<Home> {
             separatorBuilder: (_, __) => const SizedBox(width: 12),
             itemBuilder: (c, i) => GestureDetector(
               onTap: () => store.play(songs, i),
-              child: SizedBox(
-                width: 130,
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Art(songs[i], 130, radius: 8),
-                  const SizedBox(height: 6),
-                  Text(songs[i].title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
-                  Text(songs[i].artist, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                ]),
-              ),
+              child: SizedBox(width: 130, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Art(songs[i], 130, radius: 8),
+                const SizedBox(height: 6),
+                Text(songs[i].title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
+                Text(songs[i].artist, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+              ])),
             ),
           ),
         ),
@@ -881,20 +836,15 @@ class _HomeState extends State<Home> {
       ),
       Expanded(
         child: ls.isEmpty
-            ? const Center(
-                child: Padding(
-                    padding: EdgeInsets.all(24),
-                    child: Text('Create a playlist, then use the ⋮ menu on any song to add it.',
-                        textAlign: TextAlign.center, style: TextStyle(color: Colors.white54))))
+            ? const Center(child: Padding(padding: EdgeInsets.all(24),
+                child: Text('Create a playlist, then use the ⋮ menu on any song to add it.',
+                    textAlign: TextAlign.center, style: TextStyle(color: Colors.white54))))
             : ListView(children: [
                 for (final l in ls)
                   ListTile(
-                    leading: Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(color: _col(l.name), borderRadius: BorderRadius.circular(6)),
-                      child: const Icon(Icons.queue_music, color: Colors.white70),
-                    ),
+                    leading: Container(width: 48, height: 48,
+                        decoration: BoxDecoration(color: _col(l.name), borderRadius: BorderRadius.circular(6)),
+                        child: const Icon(Icons.queue_music, color: Colors.white70)),
                     title: Text(l.name, style: const TextStyle(fontWeight: FontWeight.w600)),
                     subtitle: Text('${l.ids.length} songs'),
                     onTap: () => setState(() => openPl = l.id),
@@ -915,19 +865,13 @@ class _HomeState extends State<Home> {
     final pl = store.lists[idx];
     final songs = pl.ids.map(store.byId).whereType<Song>().toList();
     return _songPage(
-      title: pl.name,
-      list: songs,
-      cur: cur,
-      pl: pl,
+      title: pl.name, list: songs, cur: cur, pl: pl,
       back: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => setState(() => openPl = null)),
       menu: PopupMenuButton<String>(
         onSelected: (v) async {
           if (v == 'ren') {
             final n = await askName(context, 'Rename playlist', pl.name);
-            if (n != null && n.isNotEmpty) {
-              pl.name = n;
-              store.touch();
-            }
+            if (n != null && n.isNotEmpty) { pl.name = n; store.touch(); }
           } else {
             store.lists.remove(pl);
             store.touch();
@@ -943,28 +887,53 @@ class _HomeState extends State<Home> {
     );
   }
 
+  Widget _libraryBody(String? cur) {
+    final allSongs = store.songs;
+    if (q.isNotEmpty) {
+      final k = q.toLowerCase();
+      final filtered = allSongs.where((s) => '${s.title} ${s.artist}'.toLowerCase().contains(k)).toList();
+      return ListView.builder(itemCount: filtered.length, itemBuilder: (c, i) => _tile(filtered, i, cur, null));
+    }
+    final recentSongs = store.recentIds.map(store.byId).whereType<Song>().toList();
+    return ListView(children: [
+      if (recentSongs.isNotEmpty) ...[
+        const Padding(padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
+            child: Text('Recently played', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white70))),
+        for (var i = 0; i < recentSongs.length; i++)
+          _tile(recentSongs, i, cur, null),
+        const Divider(color: Colors.white12, height: 24),
+      ],
+      const Padding(padding: EdgeInsets.fromLTRB(16, 4, 16, 4),
+          child: Text('All songs', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white70))),
+      if (allSongs.isEmpty)
+        const Padding(padding: EdgeInsets.all(24),
+            child: Text('Tap + to add songs or scan a folder', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54)))
+      else
+        for (var i = 0; i < allSongs.length; i++)
+          _tile(allSongs, i, cur, null),
+    ]);
+  }
+
   Widget _page(String? cur) {
     switch (tab) {
-      case 0:
-        return _home(cur);
+      case 0: return _home(cur);
       case 1:
         final k = q.toLowerCase();
+        final displayList = q.isEmpty
+            ? store.songs
+            : store.songs.where((s) => '${s.title} ${s.artist}'.toLowerCase().contains(k)).toList();
         return _songPage(
-          title: 'Your Library',
-          list: store.songs.where((s) => '${s.title} ${s.artist}'.toLowerCase().contains(k)).toList(),
-          cur: cur,
-          search: true,
-          menu: _libMenu(),
+          title: 'Your Library', list: displayList, cur: cur,
+          search: true, menu: _libMenu(),
           empty: 'Tap + to add songs or scan a folder',
+          body: _libraryBody(cur),
         );
-      case 2:
-        return openPl == null ? _playlists() : _plDetail(cur);
+      case 2: return openPl == null ? _playlists() : _plDetail(cur);
       default:
         return _songPage(
           title: 'Liked Songs',
           list: store.songs.where((s) => store.liked.contains(s.id)).toList(),
-          cur: cur,
-          empty: 'Tap a ♡ on any song',
+          cur: cur, empty: 'Tap a ♡ on any song',
         );
     }
   }
@@ -979,24 +948,14 @@ class _HomeState extends State<Home> {
           canPop: tab == 0 && openPl == null,
           onPopInvokedWithResult: (didPop, _) {
             if (didPop) return;
-            setState(() {
-              if (openPl != null) {
-                openPl = null;
-              } else {
-                tab = 0;
-              }
-            });
+            setState(() { if (openPl != null) { openPl = null; } else { tab = 0; } });
           },
           child: Scaffold(
             body: SafeArea(
               child: Column(children: [
                 if (store.busy != null)
-                  Container(
-                    width: double.infinity,
-                    color: green,
-                    padding: const EdgeInsets.all(8),
-                    child: Text(store.busy!, style: const TextStyle(color: Colors.black, fontWeight: FontWeight.w600)),
-                  ),
+                  Container(width: double.infinity, color: green, padding: const EdgeInsets.all(8),
+                      child: Text(store.busy!, style: const TextStyle(color: Colors.black, fontWeight: FontWeight.w600))),
                 if (store.updateUrl != null)
                   Material(
                     color: const Color(0xFF2A2A2A),
@@ -1005,12 +964,10 @@ class _HomeState extends State<Home> {
                       leading: const Icon(Icons.system_update, color: green),
                       title: Text(store.updating ? 'Downloading update…' : 'Update available (${store.updateTag})'),
                       subtitle: store.updating ? LinearProgressIndicator(value: store.updatePct) : null,
-                      trailing: store.updating
-                          ? null
-                          : FilledButton(
-                              style: FilledButton.styleFrom(backgroundColor: green, foregroundColor: Colors.black),
-                              onPressed: () => _run(store.installUpdate()),
-                              child: const Text('Update')),
+                      trailing: store.updating ? null : FilledButton(
+                          style: FilledButton.styleFrom(backgroundColor: green, foregroundColor: Colors.black),
+                          onPressed: () => _run(store.installUpdate()),
+                          child: const Text('Update')),
                     ),
                   ),
                 Expanded(
@@ -1029,12 +986,11 @@ class _HomeState extends State<Home> {
               const MiniPlayer(),
               NavigationBar(
                 selectedIndex: tab,
-                onDestinationSelected: (i) => setState(() {
-                  tab = i;
-                  openPl = null;
-                  q = '';
-                }),
+                onDestinationSelected: (i) => setState(() { tab = i; openPl = null; q = ''; }),
                 destinations: const [
+                  NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
+                  NavigationDestination(icon: Icon(Icons.library_music_outlined), selectedIcon: Icon(Icons.library_music), label: 'Library'),
+                  NavigationDestination(icon: Icon(Icons.queue_music_outlined), selectedIcon: Icon(Icons.queue_music), label: 'Playlists'),
                   NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
                   NavigationDestination(icon: Icon(Icons.library_music_outlined), selectedIcon: Icon(Icons.library_music), label: 'Library'),
                   NavigationDestination(icon: Icon(Icons.queue_music_outlined), selectedIcon: Icon(Icons.queue_music), label: 'Playlists'),
@@ -1048,8 +1004,6 @@ class _HomeState extends State<Home> {
     );
   }
 }
-
-// ---------------------------------------------------------------- player UI
 class MiniPlayer extends StatelessWidget {
   const MiniPlayer({super.key});
   @override
@@ -1075,18 +1029,14 @@ class MiniPlayer extends StatelessWidget {
                     child: Row(children: [
                       Art(s, 44),
                       const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          Text(s.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
-                          Text(s.artist, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70, fontSize: 12)),
-                        ]),
-                      ),
+                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(s.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
+                        Text(s.artist, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                      ])),
                     ]),
                   ),
                 ),
-                IconButton(
-                    icon: Icon(lk ? Icons.favorite : Icons.favorite_border, color: lk ? green : Colors.white70),
-                    onPressed: () => store.like(s.id)),
+                IconButton(icon: Icon(lk ? Icons.favorite : Icons.favorite_border, color: lk ? green : Colors.white70), onPressed: () => store.like(s.id)),
                 IconButton(icon: const Icon(Icons.skip_previous), onPressed: () => player.seekToPrevious()),
                 StreamBuilder<PlayerState>(
                   stream: player.playerStateStream,
@@ -1110,7 +1060,6 @@ class MiniPlayer extends StatelessWidget {
   }
 }
 
-
 class NowPlaying extends StatelessWidget {
   const NowPlaying({super.key});
   @override
@@ -1130,8 +1079,7 @@ class NowPlaying extends StatelessWidget {
           return Container(
             decoration: BoxDecoration(
               gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
+                begin: Alignment.topCenter, end: Alignment.bottomCenter,
                 colors: [_col(s.title), const Color(0xFF121212)],
                 stops: const [0, .7],
               ),
@@ -1142,36 +1090,28 @@ class NowPlaying extends StatelessWidget {
                 backgroundColor: Colors.transparent,
                 centerTitle: true,
                 title: const Text('Now playing', style: TextStyle(fontSize: 14)),
-                leading: IconButton(
-                    icon: const Icon(Icons.keyboard_arrow_down, size: 32),
-                    onPressed: () => Navigator.of(context).pop()),
+                leading: IconButton(icon: const Icon(Icons.keyboard_arrow_down, size: 32), onPressed: () => Navigator.of(context).pop()),
               ),
               body: Padding(
                 padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
                 child: Column(children: [
-                  Expanded(
-                    child: LayoutBuilder(
-                      builder: (c, b) => Center(child: Art(s, min(b.maxWidth, b.maxHeight), radius: 12)),
-                    ),
-                  ),
+                  Expanded(child: LayoutBuilder(
+                      builder: (c, b) => Center(child: Art(s, min(b.maxWidth, b.maxHeight), radius: 12)))),
                   const SizedBox(height: 16),
                   Row(children: [
-                    Expanded(
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text(s.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
-                        Text(s.artist, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, color: Colors.white70)),
-                      ]),
-                    ),
-                    IconButton(
-                        iconSize: 30,
+                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(s.title, maxLines: 2, overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
+                      Text(s.artist, maxLines: 1, overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 16, color: Colors.white70)),
+                    ])),
+                    IconButton(iconSize: 30,
                         icon: Icon(lk ? Icons.favorite : Icons.favorite_border, color: lk ? green : Colors.white),
                         onPressed: () => store.like(s.id)),
                   ]),
                   const SeekBar(),
                   Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-                    IconButton(
-                        icon: Icon(Icons.shuffle, color: store.shuffle ? green : Colors.white70),
-                        onPressed: store.toggleShuffle),
+                    IconButton(icon: Icon(Icons.shuffle, color: store.shuffle ? green : Colors.white70), onPressed: store.toggleShuffle),
                     IconButton(iconSize: 40, icon: const Icon(Icons.skip_previous), onPressed: () => player.seekToPrevious()),
                     StreamBuilder<PlayerState>(
                       stream: player.playerStateStream,
@@ -1193,49 +1133,25 @@ class NowPlaying extends StatelessWidget {
                   ]),
                   const SizedBox(height: 8),
                   Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                    ActionChip(
-                        avatar: const Icon(Icons.speed, size: 18),
-                        label: Text('${store.speed}x'),
-                        onPressed: () => pickSpeed(context)),
+                    ActionChip(avatar: const Icon(Icons.speed, size: 18), label: Text('${store.speed}x'), onPressed: () => pickSpeed(context)),
                     const SizedBox(width: 8),
                     ActionChip(
                         avatar: const Icon(Icons.bedtime_outlined, size: 18),
                         label: Text(sleep == null ? 'Sleep' : '~${sleep.difference(DateTime.now()).inMinutes + 1}m'),
                         onPressed: () => pickSleep(context)),
                     const SizedBox(width: 8),
-                    if (s.lyrics != null)
+                    if (s.lyrics != null || s.syncedLyrics != null)
                       ActionChip(
                           avatar: const Icon(Icons.lyrics_outlined, size: 18),
                           label: const Text('Lyrics'),
                           onPressed: () => showModalBottomSheet(
                                 context: context,
                                 isScrollControlled: true,
+                                isDismissible: false,
+                                enableDrag: true,
                                 backgroundColor: const Color(0xFF1A1A1A),
-                                shape: const RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-                                builder: (_) => DraggableScrollableSheet(
-                                      expand: false,
-                                      initialChildSize: 0.6,
-                                      maxChildSize: 0.92,
-                                      minChildSize: 0.3,
-                                      builder: (_, sc) => Column(children: [
-                                        const SizedBox(height: 12),
-                                        Container(width: 40, height: 4,
-                                            decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
-                                        const SizedBox(height: 12),
-                                        Text(s.title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-                                        Text(s.artist, style: const TextStyle(color: Colors.white54, fontSize: 13)),
-                                        const Divider(height: 24, color: Colors.white12),
-                                        Expanded(
-                                          child: SingleChildScrollView(
-                                            controller: sc,
-                                            padding: const EdgeInsets.fromLTRB(24, 0, 24, 32),
-                                            child: Text(s.lyrics!,
-                                                style: const TextStyle(fontSize: 15, height: 1.8, color: Colors.white70)),
-                                          ),
-                                        ),
-                                      ]),
-                                    ),
+                                shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+                                builder: (_) => LyricsSheet(s: s),
                               )),
                   ]),
                 ]),
@@ -1244,6 +1160,109 @@ class NowPlaying extends StatelessWidget {
           );
         },
       ),
+    );
+  }
+}
+
+class LyricsSheet extends StatefulWidget {
+  final Song s;
+  const LyricsSheet({super.key, required this.s});
+  @override
+  State<LyricsSheet> createState() => _LyricsSheetState();
+}
+
+class _LyricsSheetState extends State<LyricsSheet> {
+  late final ScrollController _sc;
+  late final List<({int ms, String line})> _lines;
+  late final bool _isSynced;
+  static const double _lineHeight = 44.0;
+
+  @override
+  void initState() {
+    super.initState();
+    _sc = ScrollController();
+    _isSynced = widget.s.syncedLyrics != null;
+    _lines = _isSynced ? parseLrc(widget.s.syncedLyrics!) : [];
+  }
+
+  @override
+  void dispose() { _sc.dispose(); super.dispose(); }
+
+  void _scrollToLine(int idx) {
+    if (!_sc.hasClients) return;
+    final offset = idx * _lineHeight;
+    final viewportHeight = _sc.position.viewportDimension;
+    final target = offset - viewportHeight / 2 + _lineHeight / 2;
+    _sc.animateTo(target.clamp(0.0, _sc.position.maxScrollExtent),
+        duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.6,
+      maxChildSize: 0.92,
+      minChildSize: 0.3,
+      builder: (_, sheetSc) => Column(children: [
+        const SizedBox(height: 12),
+        Container(width: 40, height: 4,
+            decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
+        const SizedBox(height: 8),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(children: [
+            const Spacer(),
+            IconButton(icon: const Icon(Icons.close, color: Colors.white54), onPressed: () => Navigator.of(context).pop()),
+          ]),
+        ),
+        Text(widget.s.title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        Text(widget.s.artist, style: const TextStyle(color: Colors.white54, fontSize: 13)),
+        const Divider(height: 24, color: Colors.white12),
+        Expanded(
+          child: _isSynced
+              ? StreamBuilder<Duration>(
+                  stream: player.positionStream,
+                  builder: (ctx, snap) {
+                    final posMs = snap.data?.inMilliseconds ?? 0;
+                    var curIdx = -1;
+                    for (var i = 0; i < _lines.length; i++) {
+                      if (_lines[i].ms <= posMs) curIdx = i;
+                    }
+                    if (curIdx >= 0) {
+                      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToLine(curIdx));
+                    }
+                    return ListView.builder(
+                      controller: _sc,
+                      padding: const EdgeInsets.fromLTRB(24, 0, 24, 32),
+                      itemCount: _lines.length,
+                      itemBuilder: (c, i) {
+                        final isCur = i == curIdx;
+                        return SizedBox(
+                          height: _lineHeight,
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(_lines[i].line,
+                              style: TextStyle(
+                                fontSize: isCur ? 17 : 15,
+                                fontWeight: isCur ? FontWeight.bold : FontWeight.normal,
+                                color: isCur ? Colors.white : Colors.white54,
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    );
+                  },
+                )
+              : SingleChildScrollView(
+                  controller: _sc,
+                  padding: const EdgeInsets.fromLTRB(24, 0, 24, 32),
+                  child: Text(widget.s.lyrics ?? '',
+                      style: const TextStyle(fontSize: 15, height: 1.8, color: Colors.white70)),
+                ),
+        ),
+      ]),
     );
   }
 }
@@ -1266,10 +1285,7 @@ class SeekBar extends StatelessWidget {
               Text(fmtD(pos), style: const TextStyle(fontSize: 11, color: Colors.white70)),
               Expanded(
                 child: Slider(
-                  value: v,
-                  max: mx,
-                  activeColor: green,
-                  inactiveColor: Colors.white24,
+                  value: v, max: mx, activeColor: green, inactiveColor: Colors.white24,
                   onChanged: dur.inMilliseconds > 0 ? (x) => player.seek(Duration(milliseconds: x.round())) : null,
                 ),
               ),
@@ -1282,4 +1298,3 @@ class SeekBar extends StatelessWidget {
     );
   }
 }
-// END_OF_SOUNDWAVE
