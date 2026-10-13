@@ -70,13 +70,31 @@ Future<String?> _fetchItunesArt(String title, String artist) async {
   }
 }
 
-// Feature 2b: returns both plain and synced lyrics
+// Fuzzy string similarity: ratio of common chars to max length (0..1)
+double _similarity(String a, String b) {
+  final s1 = a.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+  final s2 = b.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+  if (s1.isEmpty && s2.isEmpty) return 1;
+  if (s1.isEmpty || s2.isEmpty) return 0;
+  // Count matching chars via frequency maps
+  final freq = <String, int>{};
+  for (final c in s1.split('')) freq[c] = (freq[c] ?? 0) + 1;
+  var common = 0;
+  for (final c in s2.split('')) {
+    if ((freq[c] ?? 0) > 0) { common++; freq[c] = freq[c]! - 1; }
+  }
+  return common / (s1.length > s2.length ? s1.length : s2.length);
+}
+
+// Feature 2b: returns both plain and synced lyrics; fuzzy-scores results when artist unknown
 Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist) async {
-  final queries = artist == 'Unknown artist'
-      ? ['https://lrclib.net/api/search?q=${Uri.encodeComponent(title)}']
+  final unknownArtist = artist == 'Unknown artist';
+  final queries = unknownArtist
+      ? ['https://lrclib.net/api/search?track_name=${Uri.encodeComponent(title)}']
       : [
+          'https://lrclib.net/api/search?track_name=${Uri.encodeComponent(title)}&artist_name=${Uri.encodeComponent(artist)}',
           'https://lrclib.net/api/search?q=${Uri.encodeComponent('$title $artist')}',
-          'https://lrclib.net/api/search?q=${Uri.encodeComponent(title)}',
+          'https://lrclib.net/api/search?track_name=${Uri.encodeComponent(title)}',
         ];
   String? foundPlain;
   String? foundSynced;
@@ -88,20 +106,29 @@ Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist) asy
       if (r.statusCode != 200) continue;
       final list = jsonDecode(r.body) as List?;
       if (list == null || list.isEmpty) continue;
-      // Pick first item with syncedLyrics
+
+      // When artist is unknown, sort results by title similarity so best match wins
+      final ranked = list.cast<Map>();
+      if (unknownArtist) {
+        ranked.sort((a, b) {
+          final sa = _similarity(title, (a['trackName'] as String?) ?? '');
+          final sb = _similarity(title, (b['trackName'] as String?) ?? '');
+          return sb.compareTo(sa); // descending
+        });
+      }
+
       if (foundSynced == null) {
-        for (final item in list) {
-          final synced = (item as Map)['syncedLyrics'] as String?;
+        for (final item in ranked) {
+          final synced = item['syncedLyrics'] as String?;
           if (synced != null && synced.trim().isNotEmpty) {
             foundSynced = synced.trim();
             break;
           }
         }
       }
-      // Pick first item with plainLyrics
       if (foundPlain == null) {
-        for (final item in list) {
-          final plain = (item as Map)['plainLyrics'] as String?;
+        for (final item in ranked) {
+          final plain = item['plainLyrics'] as String?;
           if (plain != null && plain.trim().isNotEmpty) {
             foundPlain = plain.trim();
             break;
@@ -394,6 +421,19 @@ class Store extends ChangeNotifier {
 
 
 
+  // ---- manual edit song info
+  Future<void> editSongInfo(Song s, String newTitle, String newArtist) async {
+    s.title = newTitle.trim().isEmpty ? s.title : newTitle.trim();
+    s.artist = newArtist.trim().isEmpty ? s.artist : newArtist.trim();
+    // Clear lyrics so they re-fetch with correct metadata
+    s.lyrics = null;
+    s.syncedLyrics = null;
+    save();
+    notifyListeners();
+    // Re-fetch in background
+    _enrich(s).then((_) { save(); notifyListeners(); });
+  }
+
   // ---- importing
   Future<int> _import(List<MapEntry<String, String>> items, bool own) async {
     final dir = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'music'));
@@ -589,6 +629,41 @@ Future<String?> askName(BuildContext c, String title, [String init = '']) {
   );
 }
 
+Future<void> editSongInfo(BuildContext c, Song s) async {
+  final titleCtl = TextEditingController(text: s.title);
+  final artistCtl = TextEditingController(text: s.artist == 'Unknown artist' ? '' : s.artist);
+  final confirmed = await showDialog<bool>(
+    context: c,
+    builder: (d) => AlertDialog(
+      title: const Text('Edit song info'),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        TextField(
+          controller: titleCtl,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Title'),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: artistCtl,
+          decoration: const InputDecoration(labelText: 'Artist'),
+        ),
+      ]),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Cancel')),
+        FilledButton(
+          onPressed: () => Navigator.pop(d, true),
+          child: const Text('Save & refresh'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true) return;
+  final newTitle = titleCtl.text.trim();
+  final newArtist = artistCtl.text.trim();
+  await store.editSongInfo(s, newTitle, newArtist.isEmpty ? 'Unknown artist' : newArtist);
+  if (c.mounted) snack(c, 'Saved — fetching lyrics…');
+}
+
 void addToPlaylist(BuildContext c, Song s) {
   showModalBottomSheet(
     context: c,
@@ -719,9 +794,11 @@ class _HomeState extends State<Home> {
             icon: Icon(lk ? Icons.favorite : Icons.favorite_border, color: lk ? green : Colors.white54),
             onPressed: () => store.like(s.id)),
         PopupMenuButton<String>(
-          onSelected: (v) {
+          onSelected: (v) async {
             if (v == 'pl') {
               addToPlaylist(context, s);
+            } else if (v == 'edit') {
+              await editSongInfo(context, s);
             } else if (pl != null) {
               pl.ids.remove(s.id);
               store.touch();
@@ -731,6 +808,7 @@ class _HomeState extends State<Home> {
           },
           itemBuilder: (_) => [
             const PopupMenuItem(value: 'pl', child: Text('Add to playlist')),
+            const PopupMenuItem(value: 'edit', child: Text('Edit info')),
             PopupMenuItem(value: 'rm', child: Text(pl != null ? 'Remove from this playlist' : 'Remove from library')),
           ],
         ),
