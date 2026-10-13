@@ -331,17 +331,10 @@ class Store extends ChangeNotifier {
     return f.path;
   }
 
-  static final _siteJunkRe = RegExp(
-      r'\s*\(?(mp3\.pm|SpotiDownloader\.com|ytmp3\.cc|y2mate|tubidy|mp3juice|320kbps|fakaza|skull|beemp3s?|downloadming|djjohal|songspk|pagalworld|mrjatt|mp3paw|audiomack\.com|soundcloud\.com)\)?\s*',
-      caseSensitive: false);
-
-  static String _cleanTitle(String raw) =>
-      raw.trim().replaceAll(_siteJunkRe, '').trim();
-
   Future<void> _applyTags(Song s) async {
     try {
       final m = md.readMetadata(File(s.path), getImage: true);
-      if ((m.title ?? '').trim().isNotEmpty) s.title = _cleanTitle(m.title!);
+      if ((m.title ?? '').trim().isNotEmpty) s.title = m.title!.trim();
       if ((m.artist ?? '').trim().isNotEmpty) s.artist = m.artist!.trim();
       final d = m.duration;
       if (d != null) s.dur = d.inMilliseconds;
@@ -350,12 +343,7 @@ class Store extends ChangeNotifier {
   }
 
   Future<void> _enrich(Song s) async {
-    final rawBasename = p.basenameWithoutExtension(s.path).replaceAll('_', ' ').trim();
-    final cleanedBasename = _cleanTitle(rawBasename);
-    final needsMeta = s.artist == 'Unknown artist' ||
-        s.title == rawBasename ||
-        s.title == cleanedBasename;
-    if (needsMeta) {
+    if (s.artist == 'Unknown artist') {
       final mb = await _lookupMusicBrainz(s.title, s.artist);
       if (mb != null) {
         if ((mb['title'] ?? '').isNotEmpty) s.title = mb['title']!;
@@ -389,6 +377,21 @@ class Store extends ChangeNotifier {
     return 'Album art refreshed';
   }
 
+  Future<String> reenrichAll() async {
+    for (var i = 0; i < songs.length; i++) {
+      busy = 'Fetching lyrics & artist ${i + 1} of ${songs.length}…';
+      notifyListeners();
+      await Future.delayed(Duration.zero);
+      // Clear lyrics so they get re-fetched
+      songs[i].lyrics = null;
+      songs[i].syncedLyrics = null;
+      await _enrich(songs[i]);
+    }
+    busy = null;
+    touch();
+    return 'Lyrics & artist info refreshed';
+  }
+
 
 
   // ---- importing
@@ -408,7 +411,9 @@ class Store extends ChangeNotifier {
         path = p.join(dir.path, '$id${p.extension(src)}');
         await File(src).copy(path);
       }
-      var title = _cleanTitle(p.basenameWithoutExtension(items[i].value).replaceAll('_', ' '));
+      var title = p.basenameWithoutExtension(items[i].value).replaceAll('_', ' ').trim();
+      // Strip common download-site suffixes from filenames
+      title = title.replaceAll(RegExp(r'\s*\(?(mp3\.pm|SpotiDownloader\.com|ytmp3\.cc|y2mate|tubidy|mp3juice|320kbps|fakaza|skull|beemp3s?|downloadming|djjohal|songspk|pagalworld|mrjatt|mp3paw|audiomack\.com|soundcloud\.com)\)?\s*', caseSensitive: false), '').trim();
       var artist = 'Unknown artist';
       final parts = title.split(' - ');
       if (parts.length > 1) {
@@ -493,7 +498,7 @@ class Store extends ChangeNotifier {
     queue = list;
     // Auto-enrich on play if artist unknown or lyrics missing
     final s = list[i];
-    if (s.artist == 'Unknown artist' || s.lyrics == null) {
+    if (s.artist == 'Unknown artist' || (s.lyrics == null && s.syncedLyrics == null)) {
       _enrich(s).then((_) { save(); notifyListeners(); });
     }
     // Feature 1: track recently played
@@ -807,6 +812,8 @@ class _HomeState extends State<Home> {
             _run(store.rescan());
           } else if (v == 'tags') {
             _run(store.refreshTags());
+          } else if (v == 'enrich') {
+            _run(store.reenrichAll());
           }
         },
         itemBuilder: (_) => const [
@@ -814,6 +821,7 @@ class _HomeState extends State<Home> {
           PopupMenuItem(value: 'scan', child: Text('Scan a folder')),
           PopupMenuItem(value: 'rescan', child: Text('Rescan saved folders')),
           PopupMenuItem(value: 'tags', child: Text('Refresh album art & tags')),
+          PopupMenuItem(value: 'enrich', child: Text('Refresh lyrics & artist')),
         ],
       );
 
