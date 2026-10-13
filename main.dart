@@ -386,10 +386,14 @@ class Store extends ChangeNotifier {
         } catch (_) {}
       }
     }
-    // Feature 2b: fetch both plain and synced lyrics
-    final lyricsMap = await _fetchLrcLibLyrics(s.title, s.artist);
-    if (lyricsMap['plain'] != null) s.lyrics = lyricsMap['plain'];
-    if (lyricsMap['synced'] != null) s.syncedLyrics = lyricsMap['synced'];
+    // Feature 2b: fetch both plain and synced lyrics (only if missing or stale Genius URL)
+    final hasRealLyrics = (s.lyrics != null && !s.lyrics!.startsWith('http')) || s.syncedLyrics != null;
+    if (!hasRealLyrics) {
+      s.lyrics = null; // clear any stale Genius URL
+      final lyricsMap = await _fetchLrcLibLyrics(s.title, s.artist);
+      if (lyricsMap['plain'] != null) s.lyrics = lyricsMap['plain'];
+      if (lyricsMap['synced'] != null) s.syncedLyrics = lyricsMap['synced'];
+    }
   }
 
   Future<String> refreshTags() async {
@@ -1404,7 +1408,7 @@ class _LyricsChipState extends State<_LyricsChip> {
   Future<void> _fetchAndOpen() async {
     final s = widget.s;
     // If already loaded, open straight away
-    if (s.lyrics != null || s.syncedLyrics != null) {
+    if ((s.lyrics != null && !s.lyrics!.startsWith('http')) || s.syncedLyrics != null) {
       _open(s);
       return;
     }
