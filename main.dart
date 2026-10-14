@@ -203,9 +203,10 @@ Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist,
     debugPrint('[lyrics] -- NOTHING FOUND');
     return {'plain': null, 'synced': null};
   }
-  debugPrint('[lyrics] -- BEST "${best['trackName']}" score=$bestScore');
-  final synced = ((best['syncedLyrics'] as String?) ?? '').trim();
-  final plain = ((best['plainLyrics'] as String?) ?? '').trim();
+  final bestMap = best!;
+  debugPrint('[lyrics] -- BEST "${bestMap['trackName']}" score=$bestScore');
+  final synced = ((bestMap['syncedLyrics'] as String?) ?? '').trim();
+  final plain = ((bestMap['plainLyrics'] as String?) ?? '').trim();
   return {
     'plain': plain.isEmpty ? null : plain,
     'synced': synced.isEmpty ? null : synced,
