@@ -87,58 +87,129 @@ double _similarity(String a, String b) {
 }
 
 // Feature 2b: returns both plain and synced lyrics; fuzzy-scores results when artist unknown
-Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist) async {
-  final unknownArtist = artist == 'Unknown artist';
-  final queries = unknownArtist
-      ? ['https://lrclib.net/api/search?track_name=${Uri.encodeComponent(title)}']
-      : [
-          'https://lrclib.net/api/search?track_name=${Uri.encodeComponent(title)}&artist_name=${Uri.encodeComponent(artist)}',
-          'https://lrclib.net/api/search?q=${Uri.encodeComponent('$title $artist')}',
-          'https://lrclib.net/api/search?track_name=${Uri.encodeComponent(title)}',
-        ];
-  String? foundPlain;
-  String? foundSynced;
-  for (final url in queries) {
-    try {
-      final r = await http.get(Uri.parse(url),
-          headers: {'User-Agent': 'SoundWave/1.0 (soundwave-app)'})
-          .timeout(const Duration(seconds: 10));
-      if (r.statusCode != 200) continue;
-      final list = jsonDecode(r.body) as List?;
-      if (list == null || list.isEmpty) continue;
-
-      // When artist is unknown, sort results by title similarity so best match wins
-      final ranked = list.cast<Map>();
-      if (unknownArtist) {
-        ranked.sort((a, b) {
-          final sa = _similarity(title, (a['trackName'] as String?) ?? '');
-          final sb = _similarity(title, (b['trackName'] as String?) ?? '');
-          return sb.compareTo(sa); // descending
-        });
-      }
-
-      if (foundSynced == null) {
-        for (final item in ranked) {
-          final synced = item['syncedLyrics'] as String?;
-          if (synced != null && synced.trim().isNotEmpty) {
-            foundSynced = synced.trim();
-            break;
-          }
-        }
-      }
-      if (foundPlain == null) {
-        for (final item in ranked) {
-          final plain = item['plainLyrics'] as String?;
-          if (plain != null && plain.trim().isNotEmpty) {
-            foundPlain = plain.trim();
-            break;
-          }
-        }
-      }
-      if (foundPlain != null && foundSynced != null) break;
-    } catch (_) {}
+// Fallback plain-lyrics source when LRCLIB has nothing.
+Future<String?> _fetchLyricsOvh(String title, String artist) async {
+  if (artist == 'Unknown artist') return null;
+  try {
+    final url = 'https://api.lyrics.ovh/v1/'
+        '${Uri.encodeComponent(_cleanTitle(artist))}/'
+        '${Uri.encodeComponent(_cleanTitle(title))}';
+    debugPrint('[lyrics] ovh GET $url');
+    final r = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 10));
+    debugPrint('[lyrics] ovh status ${r.statusCode}');
+    if (r.statusCode != 200) return null;
+    final j = jsonDecode(r.body) as Map;
+    final txt = (j['lyrics'] as String?)?.trim();
+    return (txt == null || txt.isEmpty) ? null : txt;
+  } catch (e) {
+    debugPrint('[lyrics] ovh err $e');
+    return null;
   }
-  return {'plain': foundPlain, 'synced': foundSynced};
+}
+
+String _cleanTitle(String t) {
+  var s = t.replaceAll(RegExp(r'[\(\[][^\)\]]*[\)\]]'), ' ');
+  s = s.replaceAll(RegExp(r'\s+(feat\.?|ft\.?)\s.*$', caseSensitive: false), ' ');
+  s = s.replaceAll(
+      RegExp(r'\s*-?\s*(official( music)? (video|audio)|lyrics?( video)?|lyrical|full (video|song)|audio|video|hd|hq)\s*$',
+          caseSensitive: false),
+      ' ');
+  s = s.replaceAll(RegExp(r'\s+'), ' ').trim();
+  return s.isEmpty ? t.trim() : s;
+}
+
+Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist,
+    {int durMs = 0}) async {
+  final unknown = artist == 'Unknown artist';
+  final t = _cleanTitle(title);
+  String enc(String x) => Uri.encodeComponent(x);
+
+  debugPrint('[lyrics] -- title="$t" artist="$artist" durMs=$durMs');
+
+  Map? best;
+  var bestScore = -1.0;
+  final seen = <String>{};
+
+  Future<void> collect(String url, {String tag = ''}) async {
+    try {
+      debugPrint('[lyrics] $tag GET $url');
+      final r = await http
+          .get(Uri.parse(url), headers: {'User-Agent': 'SoundWave/1.0 (soundwave-app)'})
+          .timeout(const Duration(seconds: 12));
+      debugPrint('[lyrics] $tag status ${r.statusCode} len=${r.body.length}');
+      if (r.statusCode != 200) return;
+      dynamic decoded;
+      try {
+        decoded = jsonDecode(r.body);
+      } catch (e) {
+        debugPrint('[lyrics] $tag parse err $e');
+        return;
+      }
+      final list = decoded is List ? decoded : [decoded];
+      debugPrint('[lyrics] $tag results ${list.length}');
+      for (final raw in list) {
+        if (raw is! Map) continue;
+        final id = raw['id'];
+        if (id != null && !seen.add('$id')) continue;
+        final synced = ((raw['syncedLyrics'] as String?) ?? '').trim();
+        final plain = ((raw['plainLyrics'] as String?) ?? '').trim();
+        if (synced.isEmpty && plain.isEmpty) continue;
+        final rawTitle = (raw['trackName'] as String?) ?? '';
+        final rawArtist = (raw['artistName'] as String?) ?? '';
+        final ts = _similarity(t, rawTitle);
+        final as = unknown ? 1.0 : _similarity(artist, rawArtist);
+        debugPrint('[lyrics] $tag cand "$rawTitle" / "$rawArtist" '
+            'ts=${ts.toStringAsFixed(2)} as=${as.toStringAsFixed(2)}');
+        if (ts < 0.45) continue;
+        var score = ts + 0.45 * as;
+        final d = raw['duration'];
+        if (durMs > 0 && d is num) {
+          final diff = (d * 1000 - durMs).abs();
+          if (diff < 3000) score += 0.3;
+          else if (diff > 20000) score -= 0.2;
+        }
+        if (synced.isNotEmpty) score += 0.05;
+        if (score > bestScore) { bestScore = score; best = raw; }
+      }
+    } catch (e) {
+      debugPrint('[lyrics] $tag err $e');
+    }
+  }
+
+  if (!unknown) {
+    final dur = durMs > 0 ? '&duration=${(durMs / 1000).round()}' : '';
+    await collect(
+        'https://lrclib.net/api/get?artist_name=${enc(artist)}&track_name=${enc(t)}$dur',
+        tag: 'get');
+  }
+  if (best == null && !unknown) {
+    await collect(
+        'https://lrclib.net/api/search?track_name=${enc(t)}&artist_name=${enc(artist)}',
+        tag: 's-ta');
+    await collect('https://lrclib.net/api/search?q=${enc('$t $artist')}', tag: 's-q-ta');
+  }
+  if (best == null) {
+    await collect('https://lrclib.net/api/search?track_name=${enc(t)}', tag: 's-t');
+    await collect('https://lrclib.net/api/search?q=${enc(t)}', tag: 's-q-t');
+  }
+  if (best == null) {
+    final ovh = await _fetchLyricsOvh(title, artist);
+    if (ovh != null) {
+      debugPrint('[lyrics] ovh HIT len=${ovh.length}');
+      return {'plain': ovh, 'synced': null};
+    }
+  }
+  if (best == null) {
+    debugPrint('[lyrics] -- NOTHING FOUND');
+    return {'plain': null, 'synced': null};
+  }
+  debugPrint('[lyrics] -- BEST "${best['trackName']}" score=$bestScore');
+  final synced = ((best['syncedLyrics'] as String?) ?? '').trim();
+  final plain = ((best['plainLyrics'] as String?) ?? '').trim();
+  return {
+    'plain': plain.isEmpty ? null : plain,
+    'synced': synced.isEmpty ? null : synced,
+  };
 }
 
 // ---- Invidious search + download
@@ -209,18 +280,31 @@ Future<String?> _getBestAudioUrl(String videoId) async {
 
 // Feature 2c: LRC parser
 List<({int ms, String line})> parseLrc(String lrc) {
-  final re = RegExp(r'^\[(\d+):(\d+)\.(\d+)\]\s*(.*)');
+  final timeRe = RegExp(r'\[(\d+):(\d+)(?:[.:](\d+))?\]');
   final result = <({int ms, String line})>[];
   for (final rawLine in lrc.split('\n')) {
-    final m = re.firstMatch(rawLine.trim());
-    if (m == null) continue;
-    final mins = int.parse(m.group(1)!);
-    final secs = int.parse(m.group(2)!);
-    final centis = int.parse(m.group(3)!);
-    final text = m.group(4)!;
-    if (text.trim().isEmpty) continue;
-    final ms = mins * 60000 + secs * 1000 + centis * 10;
-    result.add((ms: ms, line: text));
+    final line = rawLine.trim();
+    if (line.isEmpty) continue;
+    final matches = timeRe.allMatches(line).toList();
+    if (matches.isEmpty) continue;
+    final text = line.substring(matches.last.end).trim();
+    if (text.isEmpty) continue;
+    for (final m in matches) {
+      final mins = int.parse(m.group(1)!);
+      final secs = int.parse(m.group(2)!);
+      final frac = m.group(3);
+      int ms = 0;
+      if (frac != null) {
+        if (frac.length == 1) {
+          ms = int.parse(frac) * 100;
+        } else if (frac.length == 2) {
+          ms = int.parse(frac) * 10;
+        } else {
+          ms = int.parse(frac.substring(0, 3));
+        }
+      }
+      result.add((ms: mins * 60000 + secs * 1000 + ms, line: text));
+    }
   }
   result.sort((a, b) => a.ms.compareTo(b.ms));
   return result;
@@ -453,7 +537,7 @@ class Store extends ChangeNotifier {
       }
     }
     // Feature 2b: fetch both plain and synced lyrics
-    final lyricsMap = await _fetchLrcLibLyrics(s.title, s.artist);
+    final lyricsMap = await _fetchLrcLibLyrics(s.title, s.artist, durMs: s.dur);
     if (lyricsMap['plain'] != null) s.lyrics = lyricsMap['plain'];
     if (lyricsMap['synced'] != null) s.syncedLyrics = lyricsMap['synced'];
   }
@@ -1677,7 +1761,7 @@ class _LyricsChipState extends State<_LyricsChip> {
     }
     // Fetch now
     setState(() => _fetching = true);
-    final map = await _fetchLrcLibLyrics(s.title, s.artist);
+    final map = await _fetchLrcLibLyrics(s.title, s.artist, durMs: s.dur);
     if (map['plain'] != null) s.lyrics = map['plain'];
     if (map['synced'] != null) s.syncedLyrics = map['synced'];
     store.save();
@@ -1685,7 +1769,7 @@ class _LyricsChipState extends State<_LyricsChip> {
     if (!mounted) return;
     setState(() => _fetching = false);
     if (s.lyrics == null && s.syncedLyrics == null) {
-      snack(context, 'No lyrics found for "${s.title}"');
+      snack(context, 'No lyrics found for "${s.title}" - ${s.artist}');
       return;
     }
     _open(s);
