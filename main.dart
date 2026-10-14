@@ -141,6 +141,72 @@ Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist) asy
   return {'plain': foundPlain, 'synced': foundSynced};
 }
 
+// ---- Invidious search + download
+const _invidiousInstances = [
+  'https://inv.nadeko.net',
+  'https://yewtu.be',
+  'https://id.420129.xyz',
+];
+
+class InvResult {
+  final String videoId, title, author, thumbnail;
+  final int lengthSeconds;
+  InvResult({required this.videoId, required this.title, required this.author, required this.thumbnail, required this.lengthSeconds});
+}
+
+Future<List<InvResult>> invSearch(String q) async {
+  for (final base in _invidiousInstances) {
+    try {
+      final url = '$base/api/v1/search?q=${Uri.encodeComponent(q)}&type=video&fields=videoId,title,author,videoThumbnails,lengthSeconds';
+      final r = await http.get(Uri.parse(url), headers: {'User-Agent': 'SoundWave/1.0'}).timeout(const Duration(seconds: 10));
+      if (r.statusCode != 200) continue;
+      final list = jsonDecode(r.body) as List;
+      return list.map((e) {
+        final thumbs = (e['videoThumbnails'] as List?) ?? [];
+        // pick medium quality thumb
+        String thumb = '';
+        for (final t in thumbs) {
+          if ((t['quality'] as String?) == 'medium') { thumb = t['url'] as String? ?? ''; break; }
+        }
+        if (thumb.isEmpty && thumbs.isNotEmpty) thumb = (thumbs.last['url'] as String?) ?? '';
+        return InvResult(
+          videoId: e['videoId'] as String,
+          title: e['title'] as String,
+          author: e['author'] as String,
+          thumbnail: thumb,
+          lengthSeconds: (e['lengthSeconds'] as num?)?.toInt() ?? 0,
+        );
+      }).toList();
+    } catch (_) {}
+  }
+  return [];
+}
+
+Future<String?> _getBestAudioUrl(String videoId) async {
+  for (final base in _invidiousInstances) {
+    try {
+      final url = '$base/api/v1/videos/$videoId?fields=adaptiveFormats,formatStreams';
+      final r = await http.get(Uri.parse(url), headers: {'User-Agent': 'SoundWave/1.0'}).timeout(const Duration(seconds: 10));
+      if (r.statusCode != 200) continue;
+      final j = jsonDecode(r.body) as Map;
+      // adaptiveFormats: audio-only streams
+      final adaptive = (j['adaptiveFormats'] as List?) ?? [];
+      // prefer opus > webm audio > mp4a, highest bitrate
+      final audioOnly = adaptive.where((f) => (f['type'] as String? ?? '').startsWith('audio/')).toList();
+      audioOnly.sort((a, b) {
+        final ba = (a['bitrate'] as num?)?.toInt() ?? 0;
+        final bb = (b['bitrate'] as num?)?.toInt() ?? 0;
+        return bb.compareTo(ba);
+      });
+      if (audioOnly.isNotEmpty) return audioOnly.first['url'] as String?;
+      // fallback: formatStreams (muxed) — worst case
+      final streams = (j['formatStreams'] as List?) ?? [];
+      if (streams.isNotEmpty) return streams.last['url'] as String?;
+    } catch (_) {}
+  }
+  return null;
+}
+
 // Feature 2c: LRC parser
 List<({int ms, String line})> parseLrc(String lrc) {
   final re = RegExp(r'^\[(\d+):(\d+)\.(\d+)\]\s*(.*)');
@@ -386,14 +452,10 @@ class Store extends ChangeNotifier {
         } catch (_) {}
       }
     }
-    // Feature 2b: fetch both plain and synced lyrics (only if missing or stale Genius URL)
-    final hasRealLyrics = (s.lyrics != null && !s.lyrics!.startsWith('http')) || s.syncedLyrics != null;
-    if (!hasRealLyrics) {
-      s.lyrics = null; // clear any stale Genius URL
-      final lyricsMap = await _fetchLrcLibLyrics(s.title, s.artist);
-      if (lyricsMap['plain'] != null) s.lyrics = lyricsMap['plain'];
-      if (lyricsMap['synced'] != null) s.syncedLyrics = lyricsMap['synced'];
-    }
+    // Feature 2b: fetch both plain and synced lyrics
+    final lyricsMap = await _fetchLrcLibLyrics(s.title, s.artist);
+    if (lyricsMap['plain'] != null) s.lyrics = lyricsMap['plain'];
+    if (lyricsMap['synced'] != null) s.syncedLyrics = lyricsMap['synced'];
   }
 
   Future<String> refreshTags() async {
@@ -424,6 +486,58 @@ class Store extends ChangeNotifier {
   }
 
 
+
+  // ---- download from Invidious
+  // Returns error string or '' on success
+  Future<String> downloadFromInvidious(InvResult result, void Function(double) onProgress) async {
+    final audioUrl = await _getBestAudioUrl(result.videoId);
+    if (audioUrl == null) return 'Could not get audio stream';
+    try {
+      final dir = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'music'));
+      await dir.create(recursive: true);
+      final id = '${DateTime.now().microsecondsSinceEpoch}';
+      // Detect extension from content-type or url
+      String ext = '.webm';
+      if (audioUrl.contains('.mp4') || audioUrl.contains('mp4a')) ext = '.m4a';
+      if (audioUrl.contains('.opus') || audioUrl.contains('opus')) ext = '.opus';
+      final path = p.join(dir.path, '$id$ext');
+      // Stream download with progress
+      final client = http.Client();
+      final req = http.Request('GET', Uri.parse(audioUrl));
+      final resp = await client.send(req).timeout(const Duration(seconds: 30));
+      final total = resp.contentLength ?? 0;
+      final sink = File(path).openWrite();
+      var got = 0;
+      await for (final chunk in resp.stream) {
+        sink.add(chunk);
+        got += chunk.length;
+        if (total > 0) onProgress(got / total);
+      }
+      await sink.close();
+      client.close();
+      // Parse title/artist from result
+      var title = result.title;
+      var artist = result.author;
+      // Clean up "- Topic" from auto-generated channels
+      artist = artist.replaceAll(RegExp(r'\s*-\s*Topic$', caseSensitive: false), '').trim();
+      // Try "Artist - Title" split
+      final parts = title.split(' - ');
+      if (parts.length > 1) {
+        artist = parts.first.trim();
+        title = parts.sublist(1).join(' - ').trim();
+      }
+      // Strip download site noise
+      title = title.replaceAll(RegExp(r'\s*\(?(mp3\.pm|SpotiDownloader\.com|ytmp3\.cc|y2mate|tubidy|mp3juice|320kbps|fakaza|skull|beemp3s?|downloadming|djjohal|songspk|pagalworld|mrjatt|mp3paw|audiomack\.com|soundcloud\.com|Official\s*(Video|Audio|Lyric\s*Video|Music\s*Video)?)\)?\s*', caseSensitive: false), '').trim();
+      final s = Song(id, title, artist, path, own: true);
+      await _applyTags(s);
+      await _enrich(s);
+      songs.insert(0, s);
+      touch();
+      return '';
+    } catch (e) {
+      return 'Download failed: $e';
+    }
+  }
 
   // ---- manual edit song info
   Future<void> editSongInfo(Song s, String newTitle, String newArtist) async {
@@ -907,12 +1021,36 @@ class _HomeState extends State<Home> {
         ],
       );
 
+  void _openSearch() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF121212),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => const _SearchSheet(),
+    );
+  }
+
   Widget _home(String? cur) {
     final songs = store.songs;
     final h = DateTime.now().hour;
     return ListView(padding: const EdgeInsets.all(16), children: [
       Text(h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening',
           style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800)),
+      const SizedBox(height: 12),
+      // Search / Download bar
+      GestureDetector(
+        onTap: _openSearch,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          decoration: BoxDecoration(color: const Color(0xFF2A2A2A), borderRadius: BorderRadius.circular(30)),
+          child: Row(children: const [
+            Icon(Icons.search, color: Colors.white54),
+            SizedBox(width: 10),
+            Text('Find & download music…', style: TextStyle(color: Colors.white54)),
+          ]),
+        ),
+      ),
       const SizedBox(height: 16),
       if (songs.isNotEmpty)
         GridView.count(
@@ -1229,6 +1367,131 @@ class _HomeState extends State<Home> {
   }
 }
 
+// ---------------------------------------------------------------- search + download sheet
+class _SearchSheet extends StatefulWidget {
+  const _SearchSheet();
+  @override
+  State<_SearchSheet> createState() => _SearchSheetState();
+}
+
+class _SearchSheetState extends State<_SearchSheet> {
+  final _ctl = TextEditingController();
+  List<InvResult> _results = [];
+  bool _searching = false;
+  String _searchErr = '';
+  // videoId -> progress (null = not downloading, -1 = done, 0..1 = progress)
+  final Map<String, double?> _dl = {};
+
+  Future<void> _search() async {
+    final q = _ctl.text.trim();
+    if (q.isEmpty) return;
+    setState(() { _searching = true; _searchErr = ''; _results = []; });
+    final res = await invSearch(q);
+    if (!mounted) return;
+    setState(() {
+      _searching = false;
+      _results = res;
+      if (res.isEmpty) _searchErr = 'No results found';
+    });
+  }
+
+  Future<void> _download(InvResult r) async {
+    if (_dl[r.videoId] != null) return; // already downloading/done
+    setState(() => _dl[r.videoId] = 0);
+    final err = await store.downloadFromInvidious(r, (pct) {
+      if (mounted) setState(() => _dl[r.videoId] = pct);
+    });
+    if (!mounted) return;
+    if (err.isNotEmpty) {
+      setState(() => _dl.remove(r.videoId));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
+    } else {
+      setState(() => _dl[r.videoId] = -1); // done
+    }
+  }
+
+  @override
+  void dispose() { _ctl.dispose(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.85,
+      maxChildSize: 0.95,
+      minChildSize: 0.5,
+      builder: (_, sc) => Column(children: [
+        const SizedBox(height: 12),
+        Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
+        const SizedBox(height: 12),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _ctl,
+                autofocus: true,
+                onSubmitted: (_) => _search(),
+                decoration: InputDecoration(
+                  hintText: 'Search for music…',
+                  prefixIcon: const Icon(Icons.search),
+                  filled: true,
+                  contentPadding: EdgeInsets.zero,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(30), borderSide: BorderSide.none),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: green, foregroundColor: Colors.black),
+              onPressed: _searching ? null : _search,
+              child: const Text('Search'),
+            ),
+          ]),
+        ),
+        const SizedBox(height: 8),
+        if (_searching) const Padding(padding: EdgeInsets.all(24), child: CircularProgressIndicator(color: green)),
+        if (_searchErr.isNotEmpty) Padding(padding: const EdgeInsets.all(24), child: Text(_searchErr, style: const TextStyle(color: Colors.white54))),
+        Expanded(
+          child: ListView.builder(
+            controller: sc,
+            itemCount: _results.length,
+            itemBuilder: (c, i) {
+              final r = _results[i];
+              final prog = _dl[r.videoId];
+              final done = prog == -1;
+              final downloading = prog != null && prog >= 0;
+              final dur = r.lengthSeconds > 0 ? fmtD(Duration(seconds: r.lengthSeconds)) : '';
+              return ListTile(
+                leading: ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: r.thumbnail.isNotEmpty
+                      ? Image.network(r.thumbnail, width: 56, height: 42, fit: BoxFit.cover, errorBuilder: (_, __, ___) => Container(width: 56, height: 42, color: const Color(0xFF2A2A2A)))
+                      : Container(width: 56, height: 42, color: const Color(0xFF2A2A2A)),
+                ),
+                title: Text(r.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                subtitle: Text('${r.author}${dur.isNotEmpty ? ' · $dur' : ''}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, color: Colors.white54)),
+                trailing: done
+                    ? const Icon(Icons.check_circle, color: green)
+                    : downloading
+                        ? SizedBox(
+                            width: 32, height: 32,
+                            child: CircularProgressIndicator(value: prog, strokeWidth: 3, color: green),
+                          )
+                        : IconButton(
+                            icon: const Icon(Icons.download_outlined, color: green),
+                            onPressed: () => _download(r),
+                          ),
+                onTap: downloading || done ? null : () => _download(r),
+              );
+            },
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
 // ---------------------------------------------------------------- player UI
 class MiniPlayer extends StatelessWidget {
   const MiniPlayer({super.key});
@@ -1408,7 +1671,7 @@ class _LyricsChipState extends State<_LyricsChip> {
   Future<void> _fetchAndOpen() async {
     final s = widget.s;
     // If already loaded, open straight away
-    if ((s.lyrics != null && !s.lyrics!.startsWith('http')) || s.syncedLyrics != null) {
+    if (s.lyrics != null || s.syncedLyrics != null) {
       _open(s);
       return;
     }
