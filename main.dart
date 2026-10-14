@@ -20,6 +20,15 @@ const kRepo = String.fromEnvironment('REPO');
 const kBuild = int.fromEnvironment('BUILD', defaultValue: 0);
 final player = AudioPlayer();
 
+// ---- in-app debug log (visible when lyrics fail)
+final List<String> lyricLog = [];
+void _lyricLog(String s) {
+  debugPrint(s);
+  final t = DateTime.now().toIso8601String().substring(11, 19);
+  lyricLog.add('$t  $s');
+  if (lyricLog.length > 200) lyricLog.removeAt(0);
+}
+
 // ---- metadata enrichment helpers
 Future<Map<String, String?>?> _lookupMusicBrainz(String title, String artist) async {
   try {
@@ -94,15 +103,15 @@ Future<String?> _fetchLyricsOvh(String title, String artist) async {
     final url = 'https://api.lyrics.ovh/v1/'
         '${Uri.encodeComponent(_cleanTitle(artist))}/'
         '${Uri.encodeComponent(_cleanTitle(title))}';
-    debugPrint('[lyrics] ovh GET $url');
+    _lyricLog('[lyrics] ovh GET $url');
     final r = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 10));
-    debugPrint('[lyrics] ovh status ${r.statusCode}');
+    _lyricLog('[lyrics] ovh status ${r.statusCode}');
     if (r.statusCode != 200) return null;
     final j = jsonDecode(r.body) as Map;
     final txt = (j['lyrics'] as String?)?.trim();
     return (txt == null || txt.isEmpty) ? null : txt;
   } catch (e) {
-    debugPrint('[lyrics] ovh err $e');
+    _lyricLog('[lyrics] ovh err $e');
     return null;
   }
 }
@@ -124,7 +133,7 @@ Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist,
   final t = _cleanTitle(title);
   String enc(String x) => Uri.encodeComponent(x);
 
-  debugPrint('[lyrics] -- title="$t" artist="$artist" durMs=$durMs');
+  _lyricLog('[lyrics] -- title="$t" artist="$artist" durMs=$durMs');
 
   Map? best;
   var bestScore = -1.0;
@@ -132,21 +141,21 @@ Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist,
 
   Future<void> collect(String url, {String tag = ''}) async {
     try {
-      debugPrint('[lyrics] $tag GET $url');
+      _lyricLog('[lyrics] $tag GET $url');
       final r = await http
           .get(Uri.parse(url), headers: {'User-Agent': 'SoundWave/1.0 (soundwave-app)'})
           .timeout(const Duration(seconds: 12));
-      debugPrint('[lyrics] $tag status ${r.statusCode} len=${r.body.length}');
+      _lyricLog('[lyrics] $tag status ${r.statusCode} len=${r.body.length}');
       if (r.statusCode != 200) return;
       dynamic decoded;
       try {
         decoded = jsonDecode(r.body);
       } catch (e) {
-        debugPrint('[lyrics] $tag parse err $e');
+        _lyricLog('[lyrics] $tag parse err $e');
         return;
       }
       final list = decoded is List ? decoded : [decoded];
-      debugPrint('[lyrics] $tag results ${list.length}');
+      _lyricLog('[lyrics] $tag results ${list.length}');
       for (final raw in list) {
         if (raw is! Map) continue;
         final id = raw['id'];
@@ -158,7 +167,7 @@ Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist,
         final rawArtist = (raw['artistName'] as String?) ?? '';
         final ts = _similarity(t, rawTitle);
         final as = unknown ? 1.0 : _similarity(artist, rawArtist);
-        debugPrint('[lyrics] $tag cand "$rawTitle" / "$rawArtist" '
+        _lyricLog('[lyrics] $tag cand "$rawTitle" / "$rawArtist" '
             'ts=${ts.toStringAsFixed(2)} as=${as.toStringAsFixed(2)}');
         if (ts < 0.45) continue;
         var score = ts + 0.45 * as;
@@ -172,7 +181,7 @@ Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist,
         if (score > bestScore) { bestScore = score; best = raw; }
       }
     } catch (e) {
-      debugPrint('[lyrics] $tag err $e');
+      _lyricLog('[lyrics] $tag err $e');
     }
   }
 
@@ -195,16 +204,16 @@ Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist,
   if (best == null) {
     final ovh = await _fetchLyricsOvh(title, artist);
     if (ovh != null) {
-      debugPrint('[lyrics] ovh HIT len=${ovh.length}');
+      _lyricLog('[lyrics] ovh HIT len=${ovh.length}');
       return {'plain': ovh, 'synced': null};
     }
   }
   if (best == null) {
-    debugPrint('[lyrics] -- NOTHING FOUND');
+    _lyricLog('[lyrics] -- NOTHING FOUND');
     return {'plain': null, 'synced': null};
   }
   final bestMap = best!;
-  debugPrint('[lyrics] -- BEST "${bestMap['trackName']}" score=$bestScore');
+  _lyricLog('[lyrics] -- BEST "${bestMap['trackName']}" score=$bestScore');
   final synced = ((bestMap['syncedLyrics'] as String?) ?? '').trim();
   final plain = ((bestMap['plainLyrics'] as String?) ?? '').trim();
   return {
@@ -1770,7 +1779,7 @@ class _LyricsChipState extends State<_LyricsChip> {
     if (!mounted) return;
     setState(() => _fetching = false);
     if (s.lyrics == null && s.syncedLyrics == null) {
-      snack(context, 'No lyrics found for "${s.title}" - ${s.artist}');
+      if (mounted) _showLyricLog(context, s);
       return;
     }
     _open(s);
@@ -1963,3 +1972,38 @@ class SeekBar extends StatelessWidget {
   }
 }
 // END_OF_SOUNDWAVE
+
+// ---- in-app debug log viewer
+void _showLyricLog(BuildContext c, Song s) {
+  showDialog(
+    context: c,
+    builder: (d) => AlertDialog(
+      title: Text('No lyrics for "${s.title}"'),
+      content: SizedBox(
+        width: double.maxFinite,
+        height: 400,
+        child: SingleChildScrollView(
+          child: SelectableText(
+            lyricLog.isEmpty
+                ? '(no log yet)'
+                : lyricLog.reversed.take(60).join('\n'),
+            style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () {
+            lyricLog.clear();
+            Navigator.pop(d);
+          },
+          child: const Text('Clear'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(d),
+          child: const Text('Close'),
+        ),
+      ],
+    ),
+  );
+}
