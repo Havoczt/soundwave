@@ -224,9 +224,12 @@ Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist,
 
 // ---- Invidious search + download
 const _invidiousInstances = [
+  'https://invidious.nerdvpn.de',
+  'https://invidious.tiekoetter.com',
+  'https://yt.chocolatemoo53.com',
+  'https://invidious.f5.si',
+  'https://inv.zoomerville.com',
   'https://inv.nadeko.net',
-  'https://yewtu.be',
-  'https://id.420129.xyz',
 ];
 
 class InvResult {
