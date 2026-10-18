@@ -222,14 +222,15 @@ Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist,
   };
 }
 
-// ---- Invidious search + download
-const _invidiousInstances = [
-  'https://invidious.nerdvpn.de',
-  'https://invidious.tiekoetter.com',
-  'https://yt.chocolatemoo53.com',
-  'https://invidious.f5.si',
-  'https://inv.zoomerville.com',
-  'https://inv.nadeko.net',
+// ---- Piped search + download (replaces Invidious)
+const _pipedInstances = [
+  'https://pipedapi.kavin.rocks',
+  'https://pipedapi.adminforge.de',
+  'https://api.piped.yt',
+  'https://pipedapi.owo.si',
+  'https://piped-api.privacy.com.de',
+  'https://pipedapi.ducks.party',
+  'https://piped-api.codespace.cz',
 ];
 
 class InvResult {
@@ -239,53 +240,51 @@ class InvResult {
 }
 
 Future<List<InvResult>> invSearch(String q) async {
-  for (final base in _invidiousInstances) {
+  for (final base in _pipedInstances) {
     try {
-      final url = '$base/api/v1/search?q=${Uri.encodeComponent(q)}&type=video&fields=videoId,title,author,videoThumbnails,lengthSeconds';
+      final url = '$base/search?q=${Uri.encodeComponent(q)}&filter=videos';
       final r = await http.get(Uri.parse(url), headers: {'User-Agent': 'SoundWave/1.0'}).timeout(const Duration(seconds: 10));
       if (r.statusCode != 200) continue;
-      final list = jsonDecode(r.body) as List;
-      return list.map((e) {
-        final thumbs = (e['videoThumbnails'] as List?) ?? [];
-        // pick medium quality thumb
-        String thumb = '';
-        for (final t in thumbs) {
-          if ((t['quality'] as String?) == 'medium') { thumb = t['url'] as String? ?? ''; break; }
-        }
-        if (thumb.isEmpty && thumbs.isNotEmpty) thumb = (thumbs.last['url'] as String?) ?? '';
-        return InvResult(
-          videoId: e['videoId'] as String,
-          title: e['title'] as String,
-          author: e['author'] as String,
-          thumbnail: thumb,
-          lengthSeconds: (e['lengthSeconds'] as num?)?.toInt() ?? 0,
-        );
-      }).toList();
+      final j = jsonDecode(r.body) as Map;
+      final items = (j['items'] as List?) ?? [];
+      final results = <InvResult>[];
+      for (final e in items) {
+        if ((e['type'] as String?) != 'stream') continue;
+        // url is like /watch?v=VIDEO_ID
+        final watchUrl = e['url'] as String? ?? '';
+        final videoId = Uri.tryParse(watchUrl)?.queryParameters['v'] ?? '';
+        if (videoId.isEmpty) continue;
+        results.add(InvResult(
+          videoId: videoId,
+          title: e['title'] as String? ?? '',
+          author: e['uploaderName'] as String? ?? '',
+          thumbnail: e['thumbnail'] as String? ?? '',
+          lengthSeconds: (e['duration'] as num?)?.toInt() ?? 0,
+        ));
+      }
+      if (results.isNotEmpty) return results;
     } catch (_) {}
   }
   return [];
 }
 
 Future<String?> _getBestAudioUrl(String videoId) async {
-  for (final base in _invidiousInstances) {
+  for (final base in _pipedInstances) {
     try {
-      final url = '$base/api/v1/videos/$videoId?fields=adaptiveFormats,formatStreams';
+      final url = '$base/streams/$videoId';
       final r = await http.get(Uri.parse(url), headers: {'User-Agent': 'SoundWave/1.0'}).timeout(const Duration(seconds: 10));
       if (r.statusCode != 200) continue;
       final j = jsonDecode(r.body) as Map;
-      // adaptiveFormats: audio-only streams
-      final adaptive = (j['adaptiveFormats'] as List?) ?? [];
-      // prefer opus > webm audio > mp4a, highest bitrate
-      final audioOnly = adaptive.where((f) => (f['type'] as String? ?? '').startsWith('audio/')).toList();
-      audioOnly.sort((a, b) {
+      final audioStreams = (j['audioStreams'] as List?) ?? [];
+      if (audioStreams.isEmpty) continue;
+      // Sort by bitrate descending
+      audioStreams.sort((a, b) {
         final ba = (a['bitrate'] as num?)?.toInt() ?? 0;
         final bb = (b['bitrate'] as num?)?.toInt() ?? 0;
         return bb.compareTo(ba);
       });
-      if (audioOnly.isNotEmpty) return audioOnly.first['url'] as String?;
-      // fallback: formatStreams (muxed) — worst case
-      final streams = (j['formatStreams'] as List?) ?? [];
-      if (streams.isNotEmpty) return streams.last['url'] as String?;
+      final streamUrl = audioStreams.first['url'] as String?;
+      if (streamUrl != null && streamUrl.isNotEmpty) return streamUrl;
     } catch (_) {}
   }
   return null;
