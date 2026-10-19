@@ -234,18 +234,14 @@ class InvResult {
 }
 
 Future<List<InvResult>> invSearch(String q) async {
-  try {
-    final results = await _yt.search.search(q);
-    return results.map((v) => InvResult(
-      videoId: v.id.value,
-      title: v.title,
-      author: v.author,
-      thumbnail: v.thumbnails.highResUrl,
-      lengthSeconds: v.duration?.inSeconds ?? 0,
-    )).toList();
-  } catch (_) {
-    return [];
-  }
+  final results = await _yt.search.search(q);
+  return results.map((v) => InvResult(
+    videoId: v.id.value,
+    title: v.title,
+    author: v.author,
+    thumbnail: v.thumbnails.highResUrl,
+    lengthSeconds: v.duration?.inSeconds ?? 0,
+  )).toList();
 }
 
 Future<String?> _getBestAudioUrl(String videoId) async {
@@ -1451,13 +1447,21 @@ class _SearchSheetState extends State<_SearchSheet> {
     final q = _ctl.text.trim();
     if (q.isEmpty) return;
     setState(() { _searching = true; _searchErr = ''; _results = []; });
-    final res = await invSearch(q);
-    if (!mounted) return;
-    setState(() {
-      _searching = false;
-      _results = res;
-      if (res.isEmpty) _searchErr = 'No results found';
-    });
+    try {
+      final res = await invSearch(q);
+      if (!mounted) return;
+      setState(() {
+        _searching = false;
+        _results = res;
+        if (res.isEmpty) _searchErr = 'No results found';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _searching = false;
+        _searchErr = 'Error: $e';
+      });
+    }
   }
 
   Future<void> _download(InvResult r) async {
