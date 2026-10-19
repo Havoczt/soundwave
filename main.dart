@@ -587,8 +587,9 @@ class Store extends ChangeNotifier {
         artist = parts.first.trim();
         title = parts.sublist(1).join(' - ').trim();
       }
-      // Strip download site noise
+      // Strip download site noise and YouTube video title junk
       title = title.replaceAll(RegExp(r'\s*\(?(mp3\.pm|SpotiDownloader\.com|ytmp3\.cc|y2mate|tubidy|mp3juice|320kbps|fakaza|skull|beemp3s?|downloadming|djjohal|songspk|pagalworld|mrjatt|mp3paw|audiomack\.com|soundcloud\.com|Official\s*(Video|Audio|Lyric\s*Video|Music\s*Video)?)\)?\s*', caseSensitive: false), '').trim();
+      title = _cleanTitle(title);
       final s = Song(id, title, artist, path, own: true);
       await _applyTags(s);
       await _enrich(s);
@@ -598,6 +599,28 @@ class Store extends ChangeNotifier {
     } catch (e) {
       return 'Download failed: $e';
     }
+  }
+
+  // ---- reset song back to file tags (clears any bad enrichment data)
+  Future<void> resetToFileTags(Song s) async {
+    // Baseline from filename
+    s.title = _cleanTitle(p.basenameWithoutExtension(s.path).replaceAll('_', ' ').trim());
+    s.artist = 'Unknown artist';
+    final parts = s.title.split(' - ');
+    if (parts.length > 1) {
+      s.artist = parts.first.trim();
+      s.title = parts.sublist(1).join(' - ').trim();
+    }
+    // Override with actual embedded tags if present
+    await _applyTags(s);
+    // Clear lyrics so they re-fetch with correct metadata
+    s.lyrics = null;
+    s.syncedLyrics = null;
+    s.art = null;
+    save();
+    notifyListeners();
+    // Re-enrich in background
+    _enrich(s).then((_) { save(); notifyListeners(); });
   }
 
   // ---- manual edit song info
@@ -631,8 +654,9 @@ class Store extends ChangeNotifier {
         await File(src).copy(path);
       }
       var title = p.basenameWithoutExtension(items[i].value).replaceAll('_', ' ').trim();
-      // Strip common download-site suffixes from filenames
+      // Strip common download-site suffixes and YouTube junk from filenames
       title = title.replaceAll(RegExp(r'\s*\(?(mp3\.pm|SpotiDownloader\.com|ytmp3\.cc|y2mate|tubidy|mp3juice|320kbps|fakaza|skull|beemp3s?|downloadming|djjohal|songspk|pagalworld|mrjatt|mp3paw|audiomack\.com|soundcloud\.com)\)?\s*', caseSensitive: false), '').trim();
+      title = _cleanTitle(title);
       var artist = 'Unknown artist';
       final parts = title.split(' - ');
       if (parts.length > 1) {
@@ -978,6 +1002,9 @@ class _HomeState extends State<Home> {
               addToPlaylist(context, s);
             } else if (v == 'edit') {
               await editSongInfo(context, s);
+            } else if (v == 'reset') {
+              await store.resetToFileTags(s);
+              if (context.mounted) snack(context, 'Reset — re-fetching info…');
             } else if (pl != null) {
               pl.ids.remove(s.id);
               store.touch();
@@ -988,6 +1015,7 @@ class _HomeState extends State<Home> {
           itemBuilder: (_) => [
             const PopupMenuItem(value: 'pl', child: Text('Add to playlist')),
             const PopupMenuItem(value: 'edit', child: Text('Edit info')),
+            const PopupMenuItem(value: 'reset', child: Text('Reset to file tags')),
             PopupMenuItem(value: 'rm', child: Text(pl != null ? 'Remove from this playlist' : 'Remove from library')),
           ],
         ),
