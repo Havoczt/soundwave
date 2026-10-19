@@ -233,6 +233,14 @@ const _pipedFallback = [
   'https://piped-api.codespace.cz',
 ];
 
+const _invidiousInstances = [
+  'https://invidious.io',
+  'https://inv.nadeko.net',
+  'https://invidious.privacyredirect.com',
+  'https://yt.drgnz.club',
+  'https://iv.datura.network',
+];
+
 List<String>? _livePipedInstances;
 
 Future<List<String>> _pipedInstances() async {
@@ -265,6 +273,52 @@ class InvResult {
   InvResult({required this.videoId, required this.title, required this.author, required this.thumbnail, required this.lengthSeconds});
 }
 
+// Search via Invidious API (fallback when Piped returns nothing)
+Future<List<InvResult>> _invidiousSearch(String q) async {
+  for (final base in _invidiousInstances) {
+    try {
+      final url = '$base/api/v1/search?q=${Uri.encodeComponent(q)}&type=video&fields=videoId,title,author,lengthSeconds,videoThumbnails';
+      final r = await http.get(Uri.parse(url), headers: {'User-Agent': 'SoundWave/1.0'}).timeout(const Duration(seconds: 10));
+      if (r.statusCode != 200) continue;
+      final items = jsonDecode(r.body) as List;
+      final results = <InvResult>[];
+      for (final e in items) {
+        final videoId = e['videoId'] as String? ?? '';
+        if (videoId.isEmpty) continue;
+        final thumbs = (e['videoThumbnails'] as List?) ?? [];
+        final thumb = thumbs.isNotEmpty ? (thumbs.first['url'] as String? ?? '') : '';
+        results.add(InvResult(
+          videoId: videoId,
+          title: e['title'] as String? ?? '',
+          author: e['author'] as String? ?? '',
+          thumbnail: thumb,
+          lengthSeconds: (e['lengthSeconds'] as num?)?.toInt() ?? 0,
+        ));
+      }
+      if (results.isNotEmpty) return results;
+    } catch (_) {}
+  }
+  return [];
+}
+
+Future<String?> _getAudioUrlInvidious(String videoId) async {
+  for (final base in _invidiousInstances) {
+    try {
+      final url = '$base/api/v1/videos/$videoId?fields=adaptiveFormats';
+      final r = await http.get(Uri.parse(url), headers: {'User-Agent': 'SoundWave/1.0'}).timeout(const Duration(seconds: 10));
+      if (r.statusCode != 200) continue;
+      final j = jsonDecode(r.body) as Map;
+      final formats = (j['adaptiveFormats'] as List?) ?? [];
+      final audio = formats.where((f) => (f['type'] as String? ?? '').startsWith('audio/')).toList();
+      if (audio.isEmpty) continue;
+      audio.sort((a, b) => ((b['bitrate'] as num?)?.toInt() ?? 0).compareTo((a['bitrate'] as num?)?.toInt() ?? 0));
+      final streamUrl = audio.first['url'] as String?;
+      if (streamUrl != null && streamUrl.isNotEmpty) return streamUrl;
+    } catch (_) {}
+  }
+  return null;
+}
+
 Future<List<InvResult>> invSearch(String q) async {
   for (final base in await _pipedInstances()) {
     try {
@@ -291,7 +345,8 @@ Future<List<InvResult>> invSearch(String q) async {
       if (results.isNotEmpty) return results;
     } catch (_) {}
   }
-  return [];
+  // Piped failed entirely — try Invidious
+  return _invidiousSearch(q);
 }
 
 Future<String?> _getBestAudioUrl(String videoId) async {
@@ -313,7 +368,8 @@ Future<String?> _getBestAudioUrl(String videoId) async {
       if (streamUrl != null && streamUrl.isNotEmpty) return streamUrl;
     } catch (_) {}
   }
-  return null;
+  // Piped failed — try Invidious
+  return _getAudioUrlInvidious(videoId);
 }
 
 // Feature 2c: LRC parser
