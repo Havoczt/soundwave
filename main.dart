@@ -497,7 +497,9 @@ class Store extends ChangeNotifier {
   }
 
   Future<void> _enrich(Song s) async {
-    if (s.artist == 'Unknown artist') {
+    // Always try MusicBrainz for unknown artists OR when title looks like a raw filename
+    final looksRaw = !s.title.contains(' ') || RegExp(r'[_\-]{2,}').hasMatch(s.title);
+    if (s.artist == 'Unknown artist' || looksRaw) {
       final mb = await _lookupMusicBrainz(s.title, s.artist);
       if (mb != null) {
         if ((mb['title'] ?? '').isNotEmpty) s.title = mb['title']!;
@@ -921,8 +923,8 @@ class Art extends StatelessWidget {
     final ph = Container(
       width: size,
       height: size,
-      decoration: BoxDecoration(color: _col(s.title), borderRadius: BorderRadius.circular(radius)),
-      child: Icon(Icons.music_note, color: Colors.white70, size: size * .5),
+      decoration: BoxDecoration(color: const Color(0xFF282828), borderRadius: BorderRadius.circular(radius)),
+      child: Icon(Icons.music_note, color: const Color(0xFF535353), size: size * .5),
     );
     final a = s.art;
     if (a == null || !File(a).existsSync()) return ph;
@@ -1864,7 +1866,7 @@ class _LyricsSheetState extends State<LyricsSheet> {
               ? StreamBuilder<Duration>(
                   stream: player.positionStream,
                   builder: (ctx, snap) {
-                    final posMs = snap.data?.inMilliseconds ?? 0;
+                    final posMs = (snap.data?.inMilliseconds ?? 0) + 300; // 300ms lookahead to compensate for display lag
                     // Find current line: last line whose ms <= posMs
                     var curIdx = -1;
                     for (var i = 0; i < _lines.length; i++) {
