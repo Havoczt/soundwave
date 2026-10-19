@@ -244,17 +244,6 @@ Future<List<InvResult>> invSearch(String q) async {
   )).toList();
 }
 
-Future<String?> _getBestAudioUrl(String videoId) async {
-  try {
-    final manifest = await _yt.videos.streamsClient.getManifest(videoId);
-    final streams = manifest.audioOnly;
-    if (streams.isEmpty) return null;
-    return streams.withHighestBitrate().url.toString();
-  } catch (_) {
-    return null;
-  }
-}
-
 // Feature 2c: LRC parser
 List<({int ms, String line})> parseLrc(String lrc) {
   final timeRe = RegExp(r'\[(\d+):(\d+)(?:[.:](\d+))?\]');
@@ -551,31 +540,44 @@ class Store extends ChangeNotifier {
   // ---- download from Invidious
   // Returns error string or '' on success
   Future<String> downloadFromInvidious(InvResult result, void Function(double) onProgress) async {
-    final audioUrl = await _getBestAudioUrl(result.videoId);
-    if (audioUrl == null) return 'Could not get audio stream';
     try {
+      final manifest = await _yt.videos.streamsClient.getManifest(result.videoId);
+      final streams = manifest.audioOnly;
+      if (streams.isEmpty) return 'Could not get audio stream';
+
+      final preferred = streams
+          .where((s) => s.codec.mimeType.contains('mp4'))
+          .fold<AudioOnlyStreamInfo?>(null, (best, s) {
+        if (best == null || s.bitrate.bitsPerSecond > best.bitrate.bitsPerSecond) {
+          return s;
+        }
+        return best;
+      });
+      final stream = preferred ?? streams.withHighestBitrate();
+
       final dir = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'music'));
       await dir.create(recursive: true);
       final id = '${DateTime.now().microsecondsSinceEpoch}';
-      // Detect extension from content-type or url
+      // Detect extension from stream metadata
       String ext = '.webm';
-      if (audioUrl.contains('.mp4') || audioUrl.contains('mp4a')) ext = '.m4a';
-      if (audioUrl.contains('.opus') || audioUrl.contains('opus')) ext = '.opus';
+      if (stream.codec.mimeType.contains('mp4') || stream.codec.name.toLowerCase().contains('aac')) {
+        ext = '.m4a';
+      } else if (stream.codec.name.toLowerCase().contains('opus')) {
+        ext = '.opus';
+      }
       final path = p.join(dir.path, '$id$ext');
+
       // Stream download with progress
-      final client = http.Client();
-      final req = http.Request('GET', Uri.parse(audioUrl));
-      final resp = await client.send(req).timeout(const Duration(seconds: 30));
-      final total = resp.contentLength ?? 0;
+      final audioStream = _yt.videos.streamsClient.get(stream);
+      final total = stream.size.totalBytes;
       final sink = File(path).openWrite();
       var got = 0;
-      await for (final chunk in resp.stream) {
+      await for (final chunk in audioStream) {
         sink.add(chunk);
         got += chunk.length;
         if (total > 0) onProgress(got / total);
       }
       await sink.close();
-      client.close();
       // Parse title/artist from result
       var title = result.title;
       var artist = result.author;
