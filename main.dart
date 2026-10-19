@@ -13,6 +13,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 const green = Color(0xFF1DB954);
 const _exts = {'.mp3', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.flac'};
@@ -223,49 +224,8 @@ Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist,
 }
 
 // ---- Piped search + download (replaces Invidious)
-const _pipedFallback = [
-  'https://pipedapi.kavin.rocks',
-  'https://pipedapi.adminforge.de',
-  'https://api.piped.yt',
-  'https://pipedapi.owo.si',
-  'https://piped-api.privacy.com.de',
-  'https://pipedapi.ducks.party',
-  'https://piped-api.codespace.cz',
-];
-
-const _invidiousInstances = [
-  'https://invidious.io',
-  'https://inv.nadeko.net',
-  'https://invidious.privacyredirect.com',
-  'https://yt.drgnz.club',
-  'https://iv.datura.network',
-];
-
-List<String>? _livePipedInstances;
-
-Future<List<String>> _pipedInstances() async {
-  if (_livePipedInstances != null) return _livePipedInstances!;
-  try {
-    final r = await http.get(
-      Uri.parse('https://piped-instances.kavin.rocks/'),
-      headers: {'User-Agent': 'SoundWave/1.0 (soundwave-app)'},
-    ).timeout(const Duration(seconds: 8));
-    if (r.statusCode == 200) {
-      final list = jsonDecode(r.body) as List;
-      final apis = list
-          .map((e) => (e as Map)['api_url'] as String?)
-          .whereType<String>()
-          .where((u) => u.startsWith('https://'))
-          .toList();
-      if (apis.isNotEmpty) {
-        _livePipedInstances = apis;
-        return apis;
-      }
-    }
-  } catch (_) {}
-  _livePipedInstances = _pipedFallback;
-  return _pipedFallback;
-}
+// ---- YouTube search + stream via youtube_explode_dart (no third-party instances)
+final _yt = YoutubeExplode();
 
 class InvResult {
   final String videoId, title, author, thumbnail;
@@ -273,103 +233,30 @@ class InvResult {
   InvResult({required this.videoId, required this.title, required this.author, required this.thumbnail, required this.lengthSeconds});
 }
 
-// Search via Invidious API (fallback when Piped returns nothing)
-Future<List<InvResult>> _invidiousSearch(String q) async {
-  for (final base in _invidiousInstances) {
-    try {
-      final url = '$base/api/v1/search?q=${Uri.encodeComponent(q)}&type=video&fields=videoId,title,author,lengthSeconds,videoThumbnails';
-      final r = await http.get(Uri.parse(url), headers: {'User-Agent': 'SoundWave/1.0'}).timeout(const Duration(seconds: 10));
-      if (r.statusCode != 200) continue;
-      final items = jsonDecode(r.body) as List;
-      final results = <InvResult>[];
-      for (final e in items) {
-        final videoId = e['videoId'] as String? ?? '';
-        if (videoId.isEmpty) continue;
-        final thumbs = (e['videoThumbnails'] as List?) ?? [];
-        final thumb = thumbs.isNotEmpty ? (thumbs.first['url'] as String? ?? '') : '';
-        results.add(InvResult(
-          videoId: videoId,
-          title: e['title'] as String? ?? '',
-          author: e['author'] as String? ?? '',
-          thumbnail: thumb,
-          lengthSeconds: (e['lengthSeconds'] as num?)?.toInt() ?? 0,
-        ));
-      }
-      if (results.isNotEmpty) return results;
-    } catch (_) {}
-  }
-  return [];
-}
-
-Future<String?> _getAudioUrlInvidious(String videoId) async {
-  for (final base in _invidiousInstances) {
-    try {
-      final url = '$base/api/v1/videos/$videoId?fields=adaptiveFormats';
-      final r = await http.get(Uri.parse(url), headers: {'User-Agent': 'SoundWave/1.0'}).timeout(const Duration(seconds: 10));
-      if (r.statusCode != 200) continue;
-      final j = jsonDecode(r.body) as Map;
-      final formats = (j['adaptiveFormats'] as List?) ?? [];
-      final audio = formats.where((f) => (f['type'] as String? ?? '').startsWith('audio/')).toList();
-      if (audio.isEmpty) continue;
-      audio.sort((a, b) => ((b['bitrate'] as num?)?.toInt() ?? 0).compareTo((a['bitrate'] as num?)?.toInt() ?? 0));
-      final streamUrl = audio.first['url'] as String?;
-      if (streamUrl != null && streamUrl.isNotEmpty) return streamUrl;
-    } catch (_) {}
-  }
-  return null;
-}
-
 Future<List<InvResult>> invSearch(String q) async {
-  for (final base in await _pipedInstances()) {
-    try {
-      final url = '$base/search?q=${Uri.encodeComponent(q)}&filter=videos';
-      final r = await http.get(Uri.parse(url), headers: {'User-Agent': 'SoundWave/1.0'}).timeout(const Duration(seconds: 10));
-      if (r.statusCode != 200) continue;
-      final j = jsonDecode(r.body) as Map;
-      final items = (j['items'] as List?) ?? [];
-      final results = <InvResult>[];
-      for (final e in items) {
-        if ((e['type'] as String?) != 'stream') continue;
-        // url is like /watch?v=VIDEO_ID
-        final watchUrl = e['url'] as String? ?? '';
-        final videoId = Uri.tryParse(watchUrl)?.queryParameters['v'] ?? '';
-        if (videoId.isEmpty) continue;
-        results.add(InvResult(
-          videoId: videoId,
-          title: e['title'] as String? ?? '',
-          author: e['uploaderName'] as String? ?? '',
-          thumbnail: e['thumbnail'] as String? ?? '',
-          lengthSeconds: (e['duration'] as num?)?.toInt() ?? 0,
-        ));
-      }
-      if (results.isNotEmpty) return results;
-    } catch (_) {}
+  try {
+    final results = await _yt.search.search(q);
+    return results.map((v) => InvResult(
+      videoId: v.id.value,
+      title: v.title,
+      author: v.author,
+      thumbnail: v.thumbnails.highResUrl,
+      lengthSeconds: v.duration?.inSeconds ?? 0,
+    )).toList();
+  } catch (_) {
+    return [];
   }
-  // Piped failed entirely — try Invidious
-  return _invidiousSearch(q);
 }
 
 Future<String?> _getBestAudioUrl(String videoId) async {
-  for (final base in await _pipedInstances()) {
-    try {
-      final url = '$base/streams/$videoId';
-      final r = await http.get(Uri.parse(url), headers: {'User-Agent': 'SoundWave/1.0'}).timeout(const Duration(seconds: 10));
-      if (r.statusCode != 200) continue;
-      final j = jsonDecode(r.body) as Map;
-      final audioStreams = (j['audioStreams'] as List?) ?? [];
-      if (audioStreams.isEmpty) continue;
-      // Sort by bitrate descending
-      audioStreams.sort((a, b) {
-        final ba = (a['bitrate'] as num?)?.toInt() ?? 0;
-        final bb = (b['bitrate'] as num?)?.toInt() ?? 0;
-        return bb.compareTo(ba);
-      });
-      final streamUrl = audioStreams.first['url'] as String?;
-      if (streamUrl != null && streamUrl.isNotEmpty) return streamUrl;
-    } catch (_) {}
+  try {
+    final manifest = await _yt.videos.streamsClient.getManifest(videoId);
+    final streams = manifest.audioOnly;
+    if (streams.isEmpty) return null;
+    return streams.withHighestBitrate().url.toString();
+  } catch (_) {
+    return null;
   }
-  // Piped failed — try Invidious
-  return _getAudioUrlInvidious(videoId);
 }
 
 // Feature 2c: LRC parser
