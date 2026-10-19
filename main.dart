@@ -497,9 +497,7 @@ class Store extends ChangeNotifier {
   }
 
   Future<void> _enrich(Song s) async {
-    // Always try MusicBrainz for unknown artists OR when title looks like a raw filename
-    final looksRaw = !s.title.contains(' ') || RegExp(r'[_\-]{2,}').hasMatch(s.title);
-    if (s.artist == 'Unknown artist' || looksRaw) {
+    if (s.artist == 'Unknown artist') {
       final mb = await _lookupMusicBrainz(s.title, s.artist);
       if (mb != null) {
         if ((mb['title'] ?? '').isNotEmpty) s.title = mb['title']!;
