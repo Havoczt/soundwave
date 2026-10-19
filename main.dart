@@ -223,7 +223,7 @@ Future<Map<String, String?>> _fetchLrcLibLyrics(String title, String artist,
 }
 
 // ---- Piped search + download (replaces Invidious)
-const _pipedInstances = [
+const _pipedFallback = [
   'https://pipedapi.kavin.rocks',
   'https://pipedapi.adminforge.de',
   'https://api.piped.yt',
@@ -233,6 +233,32 @@ const _pipedInstances = [
   'https://piped-api.codespace.cz',
 ];
 
+List<String>? _livePipedInstances;
+
+Future<List<String>> _pipedInstances() async {
+  if (_livePipedInstances != null) return _livePipedInstances!;
+  try {
+    final r = await http.get(
+      Uri.parse('https://piped-instances.kavin.rocks/'),
+      headers: {'User-Agent': 'SoundWave/1.0 (soundwave-app)'},
+    ).timeout(const Duration(seconds: 8));
+    if (r.statusCode == 200) {
+      final list = jsonDecode(r.body) as List;
+      final apis = list
+          .map((e) => (e as Map)['api_url'] as String?)
+          .whereType<String>()
+          .where((u) => u.startsWith('https://'))
+          .toList();
+      if (apis.isNotEmpty) {
+        _livePipedInstances = apis;
+        return apis;
+      }
+    }
+  } catch (_) {}
+  _livePipedInstances = _pipedFallback;
+  return _pipedFallback;
+}
+
 class InvResult {
   final String videoId, title, author, thumbnail;
   final int lengthSeconds;
@@ -240,7 +266,7 @@ class InvResult {
 }
 
 Future<List<InvResult>> invSearch(String q) async {
-  for (final base in _pipedInstances) {
+  for (final base in await _pipedInstances()) {
     try {
       final url = '$base/search?q=${Uri.encodeComponent(q)}&filter=videos';
       final r = await http.get(Uri.parse(url), headers: {'User-Agent': 'SoundWave/1.0'}).timeout(const Duration(seconds: 10));
@@ -269,7 +295,7 @@ Future<List<InvResult>> invSearch(String q) async {
 }
 
 Future<String?> _getBestAudioUrl(String videoId) async {
-  for (final base in _pipedInstances) {
+  for (final base in await _pipedInstances()) {
     try {
       final url = '$base/streams/$videoId';
       final r = await http.get(Uri.parse(url), headers: {'User-Agent': 'SoundWave/1.0'}).timeout(const Duration(seconds: 10));
