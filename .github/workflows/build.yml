@@ -40,7 +40,8 @@ jobs:
           import os
           f = 'android/app/src/main/AndroidManifest.xml'
           s = open(f).read()
-          perms = '''    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+          perms = '''    <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.WAKE_LOCK"/>
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
