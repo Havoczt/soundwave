@@ -627,7 +627,11 @@ class Store extends ChangeNotifier {
   Future<void> editSongInfo(Song s, String newTitle, String newArtist) async {
     s.title = newTitle.trim().isEmpty ? s.title : newTitle.trim();
     s.artist = newArtist.trim().isEmpty ? s.artist : newArtist.trim();
-    // Clear lyrics so they re-fetch with correct metadata
+    // Clear art, lyrics so they all re-fetch with the corrected metadata
+    if (s.art != null) {
+      try { await File(s.art!).delete(); } catch (_) {}
+      s.art = null;
+    }
     s.lyrics = null;
     s.syncedLyrics = null;
     save();
@@ -1828,7 +1832,7 @@ class _LyricsSheetState extends State<LyricsSheet> {
   late final ScrollController _sc;
   late final List<({int ms, String line})> _lines;
   late final bool _isSynced;
-  static const double _lineHeight = 44.0;
+  static const double _lineHeight = 52.0;
 
   @override
   void initState() {
@@ -1908,16 +1912,17 @@ class _LyricsSheetState extends State<LyricsSheet> {
                       itemCount: _lines.length,
                       itemBuilder: (c, i) {
                         final isCur = i == curIdx;
-                        return SizedBox(
-                          height: _lineHeight,
-                          child: Align(
-                            alignment: Alignment.centerLeft,
+                        return ConstrainedBox(
+                          constraints: const BoxConstraints(minHeight: _lineHeight),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 6),
                             child: Text(
                               _lines[i].line,
                               style: TextStyle(
                                 fontSize: isCur ? 17 : 15,
                                 fontWeight: isCur ? FontWeight.bold : FontWeight.normal,
                                 color: isCur ? Colors.white : Colors.white54,
+                                height: 1.4,
                               ),
                             ),
                           ),
