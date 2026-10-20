@@ -331,11 +331,12 @@ class Song {
   int dur;
   bool own;
   bool tagsBad; // true = artist is still unknown after all enrichment attempts
-  Song(this.id, this.title, this.artist, this.path, {this.art, this.lyrics, this.syncedLyrics, this.dur = 0, this.own = true, this.tagsBad = false});
+  String? videoId; // YouTube video ID if downloaded from YouTube
+  Song(this.id, this.title, this.artist, this.path, {this.art, this.lyrics, this.syncedLyrics, this.dur = 0, this.own = true, this.tagsBad = false, this.videoId});
   Map<String, dynamic> toJson() =>
-      {'id': id, 'title': title, 'artist': artist, 'path': path, 'art': art, 'lyrics': lyrics, 'syncedLyrics': syncedLyrics, 'dur': dur, 'own': own, 'tagsBad': tagsBad};
+      {'id': id, 'title': title, 'artist': artist, 'path': path, 'art': art, 'lyrics': lyrics, 'syncedLyrics': syncedLyrics, 'dur': dur, 'own': own, 'tagsBad': tagsBad, 'videoId': videoId};
   factory Song.fromJson(Map j) =>
-      Song(j['id'], j['title'], j['artist'], j['path'], art: j['art'], lyrics: j['lyrics'] ?? j['lyricsUrl'], syncedLyrics: j['syncedLyrics'], dur: j['dur'] ?? 0, own: j['own'] ?? true, tagsBad: j['tagsBad'] ?? false);
+      Song(j['id'], j['title'], j['artist'], j['path'], art: j['art'], lyrics: j['lyrics'] ?? j['lyricsUrl'], syncedLyrics: j['syncedLyrics'], dur: j['dur'] ?? 0, own: j['own'] ?? true, tagsBad: j['tagsBad'] ?? false, videoId: j['videoId']);
 }
 
 class Playlist {
@@ -503,20 +504,8 @@ class Store extends ChangeNotifier {
   }
 
   Future<void> _enrich(Song s) async {
-    // Only attempt MusicBrainz if artist is genuinely unknown — never overwrite
-    // a real artist tag pulled from the file's embedded metadata.
-    if (s.artist == 'Unknown artist') {
-      final mb = await _lookupMusicBrainz(s.title, s.artist);
-      if (mb != null) {
-        // Only accept MB result if similarity is high enough to trust it
-        final titleSim = _similarity(s.title, mb['title'] ?? '');
-        if (titleSim >= 0.7) {
-          if ((mb['title'] ?? '').isNotEmpty) s.title = mb['title']!;
-          if ((mb['artist'] ?? '').isNotEmpty) s.artist = mb['artist']!;
-        }
-      }
-    }
-    // Mark song as needing manual tag fix if artist still unknown after all attempts
+    // MusicBrainz removed — too many false positives overwriting correct data.
+    // Mark song as needing manual tag fix if artist still unknown
     s.tagsBad = s.artist == 'Unknown artist';
     if (s.art == null) {
       final artUrl = await _fetchItunesArt(s.title, s.artist);
@@ -565,6 +554,10 @@ class Store extends ChangeNotifier {
   // ---- download from Invidious
   // Returns error string or '' on success
   Future<String> downloadFromInvidious(InvResult result, void Function(double) onProgress) async {
+    // Deduplicate by videoId
+    if (songs.any((s) => s.videoId == result.videoId)) {
+      return 'Already in your library';
+    }
     final audioUrl = await _getBestAudioUrl(result.videoId);
     if (audioUrl == null) return 'Could not get audio stream';
     try {
@@ -621,7 +614,7 @@ class Store extends ChangeNotifier {
       // Strip download site noise and YouTube video title junk
       title = title.replaceAll(RegExp(r'\s*\(?(mp3\.pm|SpotiDownloader\.com|ytmp3\.cc|y2mate|tubidy|mp3juice|320kbps|fakaza|skull|beemp3s?|downloadming|djjohal|songspk|pagalworld|mrjatt|mp3paw|audiomack\.com|soundcloud\.com|Official\s*(Video|Audio|Lyric\s*Video|Music\s*Video)?)\)?\s*', caseSensitive: false), '').trim();
       title = _cleanTitle(title);
-      final s = Song(id, title, artist, path, own: true);
+      final s = Song(id, title, artist, path, own: true, videoId: result.videoId);
       await _applyTags(s);
       await _enrich(s);
       songs.insert(0, s);
@@ -806,6 +799,16 @@ class Store extends ChangeNotifier {
     player.setShuffleModeEnabled(shuffle);
     player.setSpeed(speed);
     player.play();
+    // Persist duration once known (YouTube downloads have no embedded duration tag)
+    player.durationStream.firstWhere((d) => d != null && d.inMilliseconds > 0)
+        .then((d) {
+          final idx = player.currentIndex;
+          if (idx != null && idx < queue.length && queue[idx].dur == 0) {
+            queue[idx].dur = d!.inMilliseconds;
+            save();
+            notifyListeners();
+          }
+        }).catchError((_) {});
   }
 
   void toggleShuffle() {
