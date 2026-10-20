@@ -19,6 +19,7 @@ const green = Color(0xFF1DB954);
 const _exts = {'.mp3', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.flac'};
 const kRepo = String.fromEnvironment('REPO');
 const kBuild = int.fromEnvironment('BUILD', defaultValue: 0);
+const kTag = String.fromEnvironment('TAG', defaultValue: '');
 final player = AudioPlayer();
 
 // ---- in-app debug log (visible when lyrics fail)
@@ -249,6 +250,10 @@ Future<String?> _getBestAudioUrl(String videoId) async {
     final manifest = await _yt.videos.streamsClient.getManifest(videoId);
     final streams = manifest.audioOnly;
     if (streams.isEmpty) return null;
+    // Prefer m4a (mp4a) — plays reliably on Android without extra codec setup
+    final m4a = streams.where((s) => s.codec.mimeType.contains('mp4a'));
+    if (m4a.isNotEmpty) return m4a.withHighestBitrate().url.toString();
+    // Fallback to highest bitrate (likely webm/opus)
     return streams.withHighestBitrate().url.toString();
   } catch (_) {
     return null;
@@ -325,11 +330,12 @@ class Song {
   String? art, lyrics, syncedLyrics; // Feature 2a: added syncedLyrics
   int dur;
   bool own;
-  Song(this.id, this.title, this.artist, this.path, {this.art, this.lyrics, this.syncedLyrics, this.dur = 0, this.own = true});
+  bool tagsBad; // true = artist is still unknown after all enrichment attempts
+  Song(this.id, this.title, this.artist, this.path, {this.art, this.lyrics, this.syncedLyrics, this.dur = 0, this.own = true, this.tagsBad = false});
   Map<String, dynamic> toJson() =>
-      {'id': id, 'title': title, 'artist': artist, 'path': path, 'art': art, 'lyrics': lyrics, 'syncedLyrics': syncedLyrics, 'dur': dur, 'own': own};
+      {'id': id, 'title': title, 'artist': artist, 'path': path, 'art': art, 'lyrics': lyrics, 'syncedLyrics': syncedLyrics, 'dur': dur, 'own': own, 'tagsBad': tagsBad};
   factory Song.fromJson(Map j) =>
-      Song(j['id'], j['title'], j['artist'], j['path'], art: j['art'], lyrics: j['lyrics'] ?? j['lyricsUrl'], syncedLyrics: j['syncedLyrics'], dur: j['dur'] ?? 0, own: j['own'] ?? true);
+      Song(j['id'], j['title'], j['artist'], j['path'], art: j['art'], lyrics: j['lyrics'] ?? j['lyricsUrl'], syncedLyrics: j['syncedLyrics'], dur: j['dur'] ?? 0, own: j['own'] ?? true, tagsBad: j['tagsBad'] ?? false);
 }
 
 class Playlist {
@@ -432,7 +438,7 @@ class Store extends ChangeNotifier {
       for (final a in (j['assets'] as List)) {
         if ('${a['name']}'.endsWith('.apk')) url = '${a['browser_download_url']}';
       }
-      if (url != null && kBuild > 0 && build > kBuild) {
+      if (url != null && kTag.isNotEmpty && tag != kTag) {
         updateUrl = url;
         updateTag = tag;
         notifyListeners();
@@ -497,13 +503,21 @@ class Store extends ChangeNotifier {
   }
 
   Future<void> _enrich(Song s) async {
+    // Only attempt MusicBrainz if artist is genuinely unknown — never overwrite
+    // a real artist tag pulled from the file's embedded metadata.
     if (s.artist == 'Unknown artist') {
       final mb = await _lookupMusicBrainz(s.title, s.artist);
       if (mb != null) {
-        if ((mb['title'] ?? '').isNotEmpty) s.title = mb['title']!;
-        if ((mb['artist'] ?? '').isNotEmpty) s.artist = mb['artist']!;
+        // Only accept MB result if similarity is high enough to trust it
+        final titleSim = _similarity(s.title, mb['title'] ?? '');
+        if (titleSim >= 0.7) {
+          if ((mb['title'] ?? '').isNotEmpty) s.title = mb['title']!;
+          if ((mb['artist'] ?? '').isNotEmpty) s.artist = mb['artist']!;
+        }
       }
     }
+    // Mark song as needing manual tag fix if artist still unknown after all attempts
+    s.tagsBad = s.artist == 'Unknown artist';
     if (s.art == null) {
       final artUrl = await _fetchItunesArt(s.title, s.artist);
       if (artUrl != null) {
@@ -557,15 +571,24 @@ class Store extends ChangeNotifier {
       final dir = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'music'));
       await dir.create(recursive: true);
       final id = '${DateTime.now().microsecondsSinceEpoch}';
-      // Detect extension from content-type or url
-      String ext = '.webm';
-      if (audioUrl.contains('.mp4') || audioUrl.contains('mp4a')) ext = '.m4a';
-      if (audioUrl.contains('.opus') || audioUrl.contains('opus')) ext = '.opus';
-      final path = p.join(dir.path, '$id$ext');
-      // Stream download with progress
+      // Stream download first to detect content-type, then pick extension
       final client = http.Client();
       final req = http.Request('GET', Uri.parse(audioUrl));
-      final resp = await client.send(req).timeout(const Duration(seconds: 30));
+      final resp = await client.send(req).timeout(const Duration(seconds: 60));
+      // Detect extension from content-type header (most reliable)
+      final ct = resp.headers['content-type'] ?? '';
+      String ext;
+      if (ct.contains('mp4') || ct.contains('m4a') || audioUrl.contains('mp4a')) {
+        ext = '.m4a';
+      } else if (ct.contains('opus') || ct.contains('ogg')) {
+        ext = '.opus';
+      } else if (ct.contains('mpeg') || ct.contains('mp3')) {
+        ext = '.mp3';
+      } else {
+        // YouTube webm/opus — prefer m4a stream; this is a fallback
+        ext = '.m4a';
+      }
+      final path = p.join(dir.path, '$id$ext');
       final total = resp.contentLength ?? 0;
       final sink = File(path).openWrite();
       var got = 0;
@@ -581,12 +604,20 @@ class Store extends ChangeNotifier {
       var artist = result.author;
       // Clean up "- Topic" from auto-generated channels
       artist = artist.replaceAll(RegExp(r'\s*-\s*Topic$', caseSensitive: false), '').trim();
-      // Try "Artist - Title" split
+      // Try "Artist - Title" split — only if left part looks like a short artist name
+      // (≤ 4 words). Avoids misparse of Spanish/multi-word song titles like
+      // "El Castillo De Dracula - Juanjo Papa Vampiro".
       final parts = title.split(' - ');
       if (parts.length > 1) {
-        artist = parts.first.trim();
-        title = parts.sublist(1).join(' - ').trim();
+        final candidate = parts.first.trim();
+        final wordCount = candidate.split(RegExp(r'\s+')).length;
+        if (wordCount <= 4) {
+          artist = candidate;
+          title = parts.sublist(1).join(' - ').trim();
+        }
       }
+      // Also use channel name as artist if it looks cleaner than "Artist - Title" parse
+      // and we didn't get a good split (artist still from channel).
       // Strip download site noise and YouTube video title junk
       title = title.replaceAll(RegExp(r'\s*\(?(mp3\.pm|SpotiDownloader\.com|ytmp3\.cc|y2mate|tubidy|mp3juice|320kbps|fakaza|skull|beemp3s?|downloadming|djjohal|songspk|pagalworld|mrjatt|mp3paw|audiomack\.com|soundcloud\.com|Official\s*(Video|Audio|Lyric\s*Video|Music\s*Video)?)\)?\s*', caseSensitive: false), '').trim();
       title = _cleanTitle(title);
@@ -664,8 +695,11 @@ class Store extends ChangeNotifier {
       var artist = 'Unknown artist';
       final parts = title.split(' - ');
       if (parts.length > 1) {
-        artist = parts.first.trim();
-        title = parts.sublist(1).join(' - ').trim();
+        final candidate = parts.first.trim();
+        if (candidate.split(RegExp(r'\s+')).length <= 4) {
+          artist = candidate;
+          title = parts.sublist(1).join(' - ').trim();
+        }
       }
       final s = Song(id, title, artist, path, own: own);
       await _applyTags(s);
@@ -988,7 +1022,21 @@ class _HomeState extends State<Home> {
     final s = list[i];
     final on = s.id == cur, lk = store.liked.contains(s.id);
     return ListTile(
-      leading: Art(s, 48),
+      leading: Stack(clipBehavior: Clip.none, children: [
+        Art(s, 48),
+        if (s.tagsBad)
+          Positioned(
+            right: -4, bottom: -4,
+            child: GestureDetector(
+              onTap: () => snack(context, '⚠ Unknown artist — tap ⋮ › Edit info to fix the title & artist'),
+              child: Container(
+                padding: const EdgeInsets.all(2),
+                decoration: const BoxDecoration(color: Color(0xFF121212), shape: BoxShape.circle),
+                child: const Icon(Icons.warning_amber_rounded, size: 16, color: Colors.orange),
+              ),
+            ),
+          ),
+      ]),
       title: Text(s.title,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
@@ -1037,48 +1085,57 @@ class _HomeState extends State<Home> {
     Widget? back,
     Widget? menu,
     String empty = '',
-    Widget? body, // Feature 1: optional custom body to replace the default ListView
+    Widget? body,
   }) {
+    // Sticky header (title + search + play row) above a scrollable body
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(8, 12, 8, 4),
-        child: Row(children: [
-          if (back != null) back else const SizedBox(width: 8),
-          Expanded(
-              child: Text(title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800))),
-          if (menu != null) menu,
+      // ── sticky section ──────────────────────────────────────────────
+      Material(
+        color: const Color(0xFF121212),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 12, 8, 4),
+            child: Row(children: [
+              if (back != null) back else const SizedBox(width: 8),
+              Expanded(
+                  child: Text(title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800))),
+              if (menu != null) menu,
+            ]),
+          ),
+          if (search)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+              child: TextField(
+                onChanged: (v) => setState(() => q = v),
+                decoration: InputDecoration(
+                    hintText: 'Search your songs',
+                    prefixIcon: const Icon(Icons.search),
+                    filled: true,
+                    contentPadding: EdgeInsets.zero,
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(30), borderSide: BorderSide.none)),
+              ),
+            ),
+          Row(children: [
+            const SizedBox(width: 8),
+            IconButton.filled(
+                style: IconButton.styleFrom(backgroundColor: green, foregroundColor: Colors.black),
+                iconSize: 30,
+                icon: const Icon(Icons.play_arrow),
+                onPressed: list.isEmpty ? null : () => store.play(list, 0)),
+            IconButton(
+                icon: Icon(Icons.shuffle, color: store.shuffle ? green : Colors.white70), onPressed: store.toggleShuffle),
+            const Spacer(),
+            Padding(
+                padding: const EdgeInsets.only(right: 16),
+                child: Text('${list.length} songs', style: const TextStyle(color: Colors.white54))),
+          ]),
+          const Divider(height: 1, color: Colors.white12),
         ]),
       ),
-      if (search)
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-          child: TextField(
-            onChanged: (v) => setState(() => q = v),
-            decoration: InputDecoration(
-                hintText: 'Search your songs',
-                prefixIcon: const Icon(Icons.search),
-                filled: true,
-                contentPadding: EdgeInsets.zero,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(30), borderSide: BorderSide.none)),
-          ),
-        ),
-      Row(children: [
-        const SizedBox(width: 8),
-        IconButton.filled(
-            style: IconButton.styleFrom(backgroundColor: green, foregroundColor: Colors.black),
-            iconSize: 30,
-            icon: const Icon(Icons.play_arrow),
-            onPressed: list.isEmpty ? null : () => store.play(list, 0)),
-        IconButton(
-            icon: Icon(Icons.shuffle, color: store.shuffle ? green : Colors.white70), onPressed: store.toggleShuffle),
-        const Spacer(),
-        Padding(
-            padding: const EdgeInsets.only(right: 16),
-            child: Text('${list.length} songs', style: const TextStyle(color: Colors.white54))),
-      ]),
+      // ── scrollable body ─────────────────────────────────────────────
       Expanded(
         child: body ?? (list.isEmpty
             ? Center(
