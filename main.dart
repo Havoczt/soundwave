@@ -16,7 +16,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 const green = Color(0xFF1DB954);
-const _exts = {'.mp3', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.flac'};
+const _exts = {'.mp3', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.flac', '.webm'};
 const kRepo = String.fromEnvironment('REPO');
 const kBuild = int.fromEnvironment('BUILD', defaultValue: 0);
 const kTag = String.fromEnvironment('TAG', defaultValue: '');
@@ -245,25 +245,21 @@ Future<List<InvResult>> invSearch(String q) async {
   )).toList();
 }
 
-// Returns (url, ext) so the caller saves the file with the correct extension.
-// Extension is derived from the manifest's container name — more reliable than
-// sniffing the HTTP Content-Type header which YouTube CDN doesn't set consistently.
-Future<({String url, String ext})?> _getBestAudioStream(String videoId) async {
+// Returns the best AudioOnlyStreamInfo for a video.
+// Callers must use _yt.videos.streamsClient.get(info) to download —
+// that method deciphers YouTube's "n" throttle parameter internally.
+// Fetching the raw .url directly with http.Client bypasses decipher
+// and produces a throttled/empty/corrupt file that ExoPlayer can't play.
+Future<AudioOnlyStreamInfo?> _getBestAudioStreamInfo(String videoId) async {
   try {
     final manifest = await _yt.videos.streamsClient.getManifest(videoId);
     final streams = manifest.audioOnly;
     if (streams.isEmpty) return null;
-    // Prefer M4A/AAC — container is mp4, plays on every Android ExoPlayer build.
+    // Prefer M4A/AAC — container mp4, reliable on all Android ExoPlayer builds.
     final m4a = streams.where((s) => s.codec.mimeType.contains('mp4a'));
-    if (m4a.isNotEmpty) {
-      final s = m4a.withHighestBitrate();
-      return (url: s.url.toString(), ext: '.m4a');
-    }
-    // Fallback: WebM/Opus. Use .webm extension so ExoPlayer parses the container
-    // correctly — saving webm bytes as .opus or .m4a breaks playback.
-    final best = streams.withHighestBitrate();
-    final container = best.container.name.toLowerCase(); // "webm", "mp4", etc.
-    return (url: best.url.toString(), ext: '.$container');
+    if (m4a.isNotEmpty) return m4a.withHighestBitrate();
+    // Fallback: WebM/Opus — works on Android 5+.
+    return streams.withHighestBitrate();
   } catch (_) {
     return null;
   }
@@ -567,27 +563,27 @@ class Store extends ChangeNotifier {
     if (songs.any((s) => s.videoId == result.videoId)) {
       return 'Already in your library';
     }
-    final stream = await _getBestAudioStream(result.videoId);
-    if (stream == null) return 'Could not get audio stream';
+    final streamInfo = await _getBestAudioStreamInfo(result.videoId);
+    if (streamInfo == null) return 'Could not get audio stream';
     try {
       final dir = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'music'));
       await dir.create(recursive: true);
       final id = '${DateTime.now().microsecondsSinceEpoch}';
-      // Extension comes from the manifest container — reliable, no header sniffing needed.
-      final client = http.Client();
-      final req = http.Request('GET', Uri.parse(stream.url));
-      final resp = await client.send(req).timeout(const Duration(seconds: 60));
-      final path = p.join(dir.path, '$id${stream.ext}');
-      final total = resp.contentLength ?? 0;
+      // Extension from manifest container — mp4→.m4a, webm→.webm, etc.
+      final ext = '.${streamInfo.container.name.toLowerCase()}';
+      final path = p.join(dir.path, '$id$ext');
+      // Use youtube_explode_dart's own downloader — it deciphers the "n" throttle
+      // parameter that YouTube embeds in stream URLs. Fetching the raw URL directly
+      // with http.Client bypasses that and produces a corrupt/empty file.
+      final total = streamInfo.size.totalBytes;
       final sink = File(path).openWrite();
       var got = 0;
-      await for (final chunk in resp.stream) {
+      await for (final chunk in _yt.videos.streamsClient.get(streamInfo)) {
         sink.add(chunk);
         got += chunk.length;
         if (total > 0) onProgress(got / total);
       }
       await sink.close();
-      client.close();
       // Parse title/artist from result
       var title = result.title;
       var artist = result.author;
