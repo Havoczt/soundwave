@@ -245,16 +245,25 @@ Future<List<InvResult>> invSearch(String q) async {
   )).toList();
 }
 
-Future<String?> _getBestAudioUrl(String videoId) async {
+// Returns (url, ext) so the caller saves the file with the correct extension.
+// Extension is derived from the manifest's container name — more reliable than
+// sniffing the HTTP Content-Type header which YouTube CDN doesn't set consistently.
+Future<({String url, String ext})?> _getBestAudioStream(String videoId) async {
   try {
     final manifest = await _yt.videos.streamsClient.getManifest(videoId);
     final streams = manifest.audioOnly;
     if (streams.isEmpty) return null;
-    // Prefer m4a (mp4a) — plays reliably on Android without extra codec setup
+    // Prefer M4A/AAC — container is mp4, plays on every Android ExoPlayer build.
     final m4a = streams.where((s) => s.codec.mimeType.contains('mp4a'));
-    if (m4a.isNotEmpty) return m4a.withHighestBitrate().url.toString();
-    // Fallback to highest bitrate (likely webm/opus)
-    return streams.withHighestBitrate().url.toString();
+    if (m4a.isNotEmpty) {
+      final s = m4a.withHighestBitrate();
+      return (url: s.url.toString(), ext: '.m4a');
+    }
+    // Fallback: WebM/Opus. Use .webm extension so ExoPlayer parses the container
+    // correctly — saving webm bytes as .opus or .m4a breaks playback.
+    final best = streams.withHighestBitrate();
+    final container = best.container.name.toLowerCase(); // "webm", "mp4", etc.
+    return (url: best.url.toString(), ext: '.$container');
   } catch (_) {
     return null;
   }
@@ -558,30 +567,17 @@ class Store extends ChangeNotifier {
     if (songs.any((s) => s.videoId == result.videoId)) {
       return 'Already in your library';
     }
-    final audioUrl = await _getBestAudioUrl(result.videoId);
-    if (audioUrl == null) return 'Could not get audio stream';
+    final stream = await _getBestAudioStream(result.videoId);
+    if (stream == null) return 'Could not get audio stream';
     try {
       final dir = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'music'));
       await dir.create(recursive: true);
       final id = '${DateTime.now().microsecondsSinceEpoch}';
-      // Stream download first to detect content-type, then pick extension
+      // Extension comes from the manifest container — reliable, no header sniffing needed.
       final client = http.Client();
-      final req = http.Request('GET', Uri.parse(audioUrl));
+      final req = http.Request('GET', Uri.parse(stream.url));
       final resp = await client.send(req).timeout(const Duration(seconds: 60));
-      // Detect extension from content-type header (most reliable)
-      final ct = resp.headers['content-type'] ?? '';
-      String ext;
-      if (ct.contains('mp4') || ct.contains('m4a') || audioUrl.contains('mp4a')) {
-        ext = '.m4a';
-      } else if (ct.contains('opus') || ct.contains('ogg')) {
-        ext = '.opus';
-      } else if (ct.contains('mpeg') || ct.contains('mp3')) {
-        ext = '.mp3';
-      } else {
-        // YouTube webm/opus — prefer m4a stream; this is a fallback
-        ext = '.m4a';
-      }
-      final path = p.join(dir.path, '$id$ext');
+      final path = p.join(dir.path, '$id${stream.ext}');
       final total = resp.contentLength ?? 0;
       final sink = File(path).openWrite();
       var got = 0;
