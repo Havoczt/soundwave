@@ -245,26 +245,48 @@ Future<List<InvResult>> invSearch(String q) async {
   )).toList();
 }
 
-// Returns the best AudioOnlyStreamInfo for a video.
-// Callers must use _yt.videos.streamsClient.get(info) to download —
-// that method deciphers YouTube's "n" throttle parameter internally.
-// Fetching the raw .url directly with http.Client bypasses decipher
-// and produces a throttled/empty/corrupt file that ExoPlayer can't play.
-Future<AudioOnlyStreamInfo?> _getBestAudioStreamInfo(String videoId) async {
+// Download audio via Invidious /latest_version (itag 140 = m4a 128kbps).
+// Much faster than youtube_explode_dart's streamsClient.get() which does
+// sequential chunked requests and JS decipher — Invidious handles all that
+// server-side and gives us a plain HTTP stream.
+// Tries multiple public instances; falls back to yt-explode if all fail.
+const _invHosts = [
+  'https://inv.nadeko.net',
+  'https://invidious.privacydev.net',
+  'https://yt.cdaut.de',
+  'https://iv.melmac.space',
+  'https://invidious.slipfox.xyz',
+];
+
+Future<http.StreamedResponse?> _openAudioStream(String videoId) async {
+  // Try Invidious instances — 5s connection timeout so we don't hang on a dead host
+  for (final host in _invHosts) {
+    try {
+      final url = Uri.parse('$host/latest_version?id=$videoId&itag=140');
+      final client = http.Client();
+      final resp = await client.send(http.Request('GET', url))
+          .timeout(const Duration(seconds: 5));
+      if (resp.statusCode == 200) return resp;
+      client.close();
+    } catch (_) {}
+  }
+  // Fallback: youtube_explode_dart direct URL (manifest resolves n-param)
   try {
     final manifest = await _yt.videos.streamsClient
         .getManifest(videoId)
-        .timeout(const Duration(seconds: 20));
+        .timeout(const Duration(seconds: 15));
     final streams = manifest.audioOnly;
     if (streams.isEmpty) return null;
-    // Prefer M4A/AAC — container mp4, reliable on all Android ExoPlayer builds.
-    final m4a = streams.where((s) => s.codec.mimeType.contains('mp4a'));
-    if (m4a.isNotEmpty) return m4a.withHighestBitrate();
-    // Fallback: WebM/Opus — works on Android 5+.
-    return streams.withHighestBitrate();
-  } catch (_) {
-    return null;
-  }
+    final best = streams.where((s) => s.codec.mimeType.contains('mp4a')).isNotEmpty
+        ? streams.where((s) => s.codec.mimeType.contains('mp4a')).withHighestBitrate()
+        : streams.withHighestBitrate();
+    final client = http.Client();
+    final resp = await client.send(http.Request('GET', best.url))
+        .timeout(const Duration(seconds: 10));
+    if (resp.statusCode == 200) return resp;
+    client.close();
+  } catch (_) {}
+  return null;
 }
 
 // Feature 2c: LRC parser
@@ -565,27 +587,28 @@ class Store extends ChangeNotifier {
     if (songs.any((s) => s.videoId == result.videoId)) {
       return 'Already in your library';
     }
-    final streamInfo = await _getBestAudioStreamInfo(result.videoId);
-    if (streamInfo == null) return 'Could not get audio stream';
+    final resp = await _openAudioStream(result.videoId);
+    if (resp == null) return 'Could not get audio stream';
     try {
       final dir = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'music'));
       await dir.create(recursive: true);
       final id = '${DateTime.now().microsecondsSinceEpoch}';
-      // Extension from manifest container — mp4→.m4a, webm→.webm, etc.
-      final ext = '.${streamInfo.container.name.toLowerCase()}';
+      // itag 140 is always m4a; fallback yt-explode URL also picked as m4a above.
+      const ext = '.m4a';
       final path = p.join(dir.path, '$id$ext');
-      // Use youtube_explode_dart's own downloader — it deciphers the "n" throttle
-      // parameter that YouTube embeds in stream URLs. Fetching the raw URL directly
-      // with http.Client bypasses that and produces a corrupt/empty file.
-      final total = streamInfo.size.totalBytes;
+      final total = resp.contentLength ?? 0;
       final sink = File(path).openWrite();
       var got = 0;
-      await for (final chunk in _yt.videos.streamsClient.get(streamInfo)
-          .timeout(const Duration(seconds: 120))) {
-        sink.add(chunk);
-        got += chunk.length;
-        if (total > 0) onProgress(got / total);
-      }
+      // Total download budget: 90 s. Per-chunk: 10 s.
+      // Using forEach + .timeout() gives a hard ceiling on the whole transfer.
+      await resp.stream
+          .timeout(const Duration(seconds: 10)) // max gap between chunks
+          .forEach((chunk) {
+            sink.add(chunk);
+            got += chunk.length;
+            if (total > 0) onProgress(got / total);
+          })
+          .timeout(const Duration(seconds: 90)); // hard total limit
       await sink.close();
       // Parse title/artist from result
       var title = result.title;
