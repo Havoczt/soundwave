@@ -252,7 +252,9 @@ Future<List<InvResult>> invSearch(String q) async {
 // and produces a throttled/empty/corrupt file that ExoPlayer can't play.
 Future<AudioOnlyStreamInfo?> _getBestAudioStreamInfo(String videoId) async {
   try {
-    final manifest = await _yt.videos.streamsClient.getManifest(videoId);
+    final manifest = await _yt.videos.streamsClient
+        .getManifest(videoId)
+        .timeout(const Duration(seconds: 20));
     final streams = manifest.audioOnly;
     if (streams.isEmpty) return null;
     // Prefer M4A/AAC — container mp4, reliable on all Android ExoPlayer builds.
@@ -578,7 +580,8 @@ class Store extends ChangeNotifier {
       final total = streamInfo.size.totalBytes;
       final sink = File(path).openWrite();
       var got = 0;
-      await for (final chunk in _yt.videos.streamsClient.get(streamInfo)) {
+      await for (final chunk in _yt.videos.streamsClient.get(streamInfo)
+          .timeout(const Duration(seconds: 120))) {
         sink.add(chunk);
         got += chunk.length;
         if (total > 0) onProgress(got / total);
@@ -1629,7 +1632,9 @@ class _SearchSheetState extends State<_SearchSheet> {
                     : downloading
                         ? SizedBox(
                             width: 32, height: 32,
-                            child: CircularProgressIndicator(value: prog, strokeWidth: 3, color: green),
+                            // value: null = indeterminate (spinning) while connecting (prog==0)
+                            // value: prog = determinate once bytes start flowing
+                            child: CircularProgressIndicator(value: prog == 0 ? null : prog, strokeWidth: 3, color: green),
                           )
                         : IconButton(
                             icon: const Icon(Icons.download_outlined, color: green),
