@@ -20,6 +20,11 @@ const _exts = {'.mp3', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.flac', '.webm'
 const kRepo = String.fromEnvironment('REPO');
 const kBuild = int.fromEnvironment('BUILD', defaultValue: 0);
 const kTag = String.fromEnvironment('TAG', defaultValue: '');
+// Self-hosted yt-dlp backend (see ytdlp_api.py) — primary download path.
+// yt-dlp is updated almost daily to counter YouTube's changes; nothing that
+// runs purely on-device can keep up with that, so this is the reliable path.
+const kYtApiBase = String.fromEnvironment('YT_API_BASE', defaultValue: '');
+const kYtApiKey = String.fromEnvironment('YT_API_KEY', defaultValue: '');
 final player = AudioPlayer();
 
 // ---- in-app debug log (visible when lyrics fail)
@@ -264,7 +269,23 @@ String _lastStreamError = '';
 
 Future<http.StreamedResponse?> _openAudioStream(String videoId) async {
   final failures = <String>[];
-  // Try Invidious instances — 5s connection timeout so we don't hang on a dead host
+  // Primary: our own yt-dlp backend. yt-dlp gets updated almost daily to
+  // counter YouTube's anti-bot changes — far more reliable than any in-app
+  // extraction library. Server proxies the audio bytes through itself.
+  if (kYtApiBase.isNotEmpty) {
+    try {
+      final url = Uri.parse('$kYtApiBase/audio?id=$videoId&key=$kYtApiKey');
+      final client = http.Client();
+      final resp = await client.send(http.Request('GET', url))
+          .timeout(const Duration(seconds: 12));
+      if (resp.statusCode == 200) return resp;
+      failures.add('ytapi:${resp.statusCode}');
+      client.close();
+    } catch (e) {
+      failures.add('ytapi:${e.runtimeType}');
+    }
+  }
+  // Fallback: Invidious instances — 5s connection timeout so we don't hang on a dead host
   for (final host in _invHosts) {
     try {
       final url = Uri.parse('$host/latest_version?id=$videoId&itag=140');
@@ -284,13 +305,13 @@ Future<http.StreamedResponse?> _openAudioStream(String videoId) async {
     final manifest = await _yt.videos.streamsClient
         .getManifest(videoId)
         .timeout(const Duration(seconds: 15));
-    final streams = manifest.audioOnly;
-    if (streams.isEmpty) {
-      failures.add('yt-explode:no-audio-streams');
+    // m4a only — this path can't signal its container via headers, and
+    // guessing wrong is exactly the bug that broke playback before.
+    final m4aStreams = manifest.audioOnly.where((s) => s.codec.mimeType.contains('mp4a'));
+    if (m4aStreams.isEmpty) {
+      failures.add('yt-explode:no-m4a-stream');
     } else {
-      final best = streams.where((s) => s.codec.mimeType.contains('mp4a')).isNotEmpty
-          ? streams.where((s) => s.codec.mimeType.contains('mp4a')).withHighestBitrate()
-          : streams.withHighestBitrate();
+      final best = m4aStreams.withHighestBitrate();
       final client = http.Client();
       final resp = await client.send(http.Request('GET', best.url))
           .timeout(const Duration(seconds: 10));
@@ -609,8 +630,9 @@ class Store extends ChangeNotifier {
       final dir = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'music'));
       await dir.create(recursive: true);
       final id = '${DateTime.now().microsecondsSinceEpoch}';
-      // itag 140 is always m4a; fallback yt-explode URL also picked as m4a above.
-      const ext = '.m4a';
+      // Our backend reports the real container via X-Audio-Ext; Invidious
+      // itag 140 and the yt-explode fallback are both m4a, so default there.
+      final ext = '.${resp.headers['x-audio-ext'] ?? 'm4a'}';
       final path = p.join(dir.path, '$id$ext');
       final total = resp.contentLength ?? 0;
       final sink = File(path).openWrite();

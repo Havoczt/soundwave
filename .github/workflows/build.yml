@@ -108,9 +108,26 @@ jobs:
           echo "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
           test -s ~/.android/debug.keystore || { echo "Missing DEBUG_KEYSTORE_B64 secret"; exit 1; }
 
+      - name: Write build-time config (keeps secrets off the command line)
+        working-directory: app
+        env:
+          YT_API_BASE: ${{ secrets.YT_API_BASE }}
+          YT_API_KEY: ${{ secrets.YT_API_KEY }}
+        run: |
+          python3 -c "
+          import json, os
+          json.dump({
+              'REPO': '${{ github.repository }}',
+              'BUILD': '${{ github.run_number }}',
+              'TAG': 'v1.1.${{ github.run_number }}',
+              'YT_API_BASE': os.environ['YT_API_BASE'],
+              'YT_API_KEY': os.environ['YT_API_KEY'],
+          }, open('dart_defines.json', 'w'))
+          "
+
       - name: Build APK
         working-directory: app
-        run: flutter build apk --release --target-platform android-arm64 --build-name=1.1.${{ github.run_number }} --build-number=$((100 + ${{ github.run_number }})) --dart-define=REPO=${{ github.repository }} --dart-define=BUILD=${{ github.run_number }} --dart-define=TAG=v1.1.${{ github.run_number }}
+        run: flutter build apk --release --target-platform android-arm64 --build-name=1.1.${{ github.run_number }} --build-number=$((100 + ${{ github.run_number }})) --dart-define-from-file=dart_defines.json
 
       - name: Name the file
         run: cp app/build/app/outputs/flutter-apk/app-release.apk SoundWave.apk
