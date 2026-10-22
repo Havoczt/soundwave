@@ -250,15 +250,20 @@ Future<List<InvResult>> invSearch(String q) async {
 // sequential chunked requests and JS decipher — Invidious handles all that
 // server-side and gives us a plain HTTP stream.
 // Tries multiple public instances; falls back to yt-explode if all fail.
+// Official community-approved list (api.invidious.io) as of late 2026 — the
+// old hardcoded list had dead/untrusted hosts, which is why downloads hung.
 const _invHosts = [
   'https://inv.nadeko.net',
-  'https://invidious.privacydev.net',
-  'https://yt.cdaut.de',
-  'https://iv.melmac.space',
-  'https://invidious.slipfox.xyz',
+  'https://invidious.nerdvpn.de',
+  'https://invidious.tiekoetter.com',
+  'https://invidious.f5.si',
+  'https://yt.chocolatemoo53.com',
 ];
 
+String _lastStreamError = '';
+
 Future<http.StreamedResponse?> _openAudioStream(String videoId) async {
+  final failures = <String>[];
   // Try Invidious instances — 5s connection timeout so we don't hang on a dead host
   for (final host in _invHosts) {
     try {
@@ -267,25 +272,36 @@ Future<http.StreamedResponse?> _openAudioStream(String videoId) async {
       final resp = await client.send(http.Request('GET', url))
           .timeout(const Duration(seconds: 5));
       if (resp.statusCode == 200) return resp;
+      failures.add('$host:${resp.statusCode}');
       client.close();
-    } catch (_) {}
+    } catch (e) {
+      failures.add('$host:${e.runtimeType}');
+    }
   }
-  // Fallback: youtube_explode_dart direct URL (manifest resolves n-param)
+  // Fallback: youtube_explode_dart direct URL (pinned to 2.5.3 — pure-Dart
+  // decipher, no Deno dependency, since Android has no Deno runtime)
   try {
     final manifest = await _yt.videos.streamsClient
         .getManifest(videoId)
         .timeout(const Duration(seconds: 15));
     final streams = manifest.audioOnly;
-    if (streams.isEmpty) return null;
-    final best = streams.where((s) => s.codec.mimeType.contains('mp4a')).isNotEmpty
-        ? streams.where((s) => s.codec.mimeType.contains('mp4a')).withHighestBitrate()
-        : streams.withHighestBitrate();
-    final client = http.Client();
-    final resp = await client.send(http.Request('GET', best.url))
-        .timeout(const Duration(seconds: 10));
-    if (resp.statusCode == 200) return resp;
-    client.close();
-  } catch (_) {}
+    if (streams.isEmpty) {
+      failures.add('yt-explode:no-audio-streams');
+    } else {
+      final best = streams.where((s) => s.codec.mimeType.contains('mp4a')).isNotEmpty
+          ? streams.where((s) => s.codec.mimeType.contains('mp4a')).withHighestBitrate()
+          : streams.withHighestBitrate();
+      final client = http.Client();
+      final resp = await client.send(http.Request('GET', best.url))
+          .timeout(const Duration(seconds: 10));
+      if (resp.statusCode == 200) return resp;
+      failures.add('yt-explode:${resp.statusCode}');
+      client.close();
+    }
+  } catch (e) {
+    failures.add('yt-explode:${e.runtimeType}:$e');
+  }
+  _lastStreamError = failures.join(', ');
   return null;
 }
 
@@ -588,7 +604,7 @@ class Store extends ChangeNotifier {
       return 'Already in your library';
     }
     final resp = await _openAudioStream(result.videoId);
-    if (resp == null) return 'Could not get audio stream';
+    if (resp == null) return 'Could not get audio stream ($_lastStreamError)';
     try {
       final dir = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'music'));
       await dir.create(recursive: true);
