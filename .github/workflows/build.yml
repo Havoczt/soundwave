@@ -35,7 +35,7 @@ jobs:
       - name: Add packages and patch the Android project
         working-directory: app
         run: |
-          flutter pub add just_audio:^0.9.40 just_audio_background:^0.0.1-beta.13 file_picker:^8.1.2 path_provider:^2.1.4 path:^1.9.0 shared_preferences:^2.3.2 audio_metadata_reader:^1.8.1 permission_handler:^12.0.0 http:^1.2.2 open_filex:^4.6.0 youtube_explode_dart:2.5.3
+          flutter pub add just_audio:^0.9.40 just_audio_background:^0.0.1-beta.13 file_picker:^8.1.2 path_provider:^2.1.4 path:^1.9.0 shared_preferences:^2.3.2 audio_metadata_reader:^1.8.1 permission_handler:^12.0.0 http:^1.2.2 open_filex:^4.6.0 youtube_explode_dart:2.5.3 palette_generator:^0.3.3
           python3 - <<'PY'
           import os
           f = 'android/app/src/main/AndroidManifest.xml'

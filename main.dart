@@ -13,6 +13,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:palette_generator/palette_generator.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 const green = Color(0xFF1DB954);
@@ -26,6 +27,8 @@ const kTag = String.fromEnvironment('TAG', defaultValue: '');
 const kYtApiBase = String.fromEnvironment('YT_API_BASE', defaultValue: '');
 const kYtApiKey = String.fromEnvironment('YT_API_KEY', defaultValue: '');
 final player = AudioPlayer();
+// Palette cache: song.id → dominant color extracted from album art
+final _paletteCache = <String, Color>{};
 
 // ---- in-app debug log (visible when lyrics fail)
 final List<String> lyricLog = [];
@@ -1773,8 +1776,34 @@ class MiniPlayer extends StatelessWidget {
 }
 
 
-class NowPlaying extends StatelessWidget {
+class NowPlaying extends StatefulWidget {
   const NowPlaying({super.key});
+  @override
+  State<NowPlaying> createState() => _NowPlayingState();
+}
+
+class _NowPlayingState extends State<NowPlaying> {
+  String? _lastArt;
+
+  Future<void> _extractPalette(Song s) async {
+    if (s.art == null) return;
+    if (_paletteCache.containsKey(s.id)) return;
+    if (_lastArt == s.art) return;
+    _lastArt = s.art;
+    try {
+      final pg = await PaletteGenerator.fromImageProvider(
+        FileImage(File(s.art!)),
+        maximumColorCount: 8,
+      );
+      final color = pg.darkVibrantColor?.color ??
+          pg.vibrantColor?.color ??
+          pg.dominantColor?.color;
+      if (color != null && mounted) {
+        setState(() => _paletteCache[s.id] = color);
+      }
+    } catch (_) {}
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -1787,14 +1816,16 @@ class NowPlaying extends StatelessWidget {
             return Scaffold(appBar: AppBar(), body: const Center(child: Text('Nothing playing')));
           }
           final s = store.queue[i];
+          _extractPalette(s);
           final lk = store.liked.contains(s.id);
           final sleep = store.sleepAt;
+          final bgColor = _paletteCache[s.id] ?? _col(s.title);
           return Container(
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
-                colors: [_col(s.title), const Color(0xFF121212)],
+                colors: [bgColor, const Color(0xFF121212)],
                 stops: const [0, .7],
               ),
             ),
