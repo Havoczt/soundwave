@@ -1695,10 +1695,19 @@ class _SearchSheetState extends State<_SearchSheet> {
                     ? const Icon(Icons.check_circle, color: green)
                     : downloading
                         ? SizedBox(
-                            width: 32, height: 32,
-                            // value: null = indeterminate (spinning) while connecting (prog==0)
-                            // value: prog = determinate once bytes start flowing
-                            child: CircularProgressIndicator(value: prog == 0 ? null : prog, strokeWidth: 3, color: green),
+                            width: 48,
+                            child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                              SizedBox(
+                                width: 28, height: 28,
+                                child: CircularProgressIndicator(value: prog == 0 ? null : prog, strokeWidth: 3, color: green),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                kYtApiBase.isNotEmpty ? 'Normalizing' : 'Downloading',
+                                style: const TextStyle(fontSize: 8, color: Colors.white54),
+                                textAlign: TextAlign.center,
+                              ),
+                            ]),
                           )
                         : IconButton(
                             icon: const Icon(Icons.download_outlined, color: green),
