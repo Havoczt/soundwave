@@ -1138,8 +1138,13 @@ class Store extends ChangeNotifier {
     // MusicBrainz removed — too many false positives overwriting correct data.
     // Mark song as needing manual tag fix if artist still unknown
     s.tagsBad = s.artist == 'Unknown artist';
+    // Clear previously fetched art for unknown-artist songs — it's likely wrong.
+    if (s.tagsBad && s.art != null) {
+      try { await File(s.art!).delete(); } catch (_) {}
+      s.art = null;
+    }
     if (s.art != null && !await LocalCache.validFile(s.art)) s.art = null;
-    if (s.art == null) {
+    if (s.art == null && s.artist != 'Unknown artist') {
       final bytes = await _fetchArtBytes(s.title, s.artist);
       if (bytes != null) s.art = await _saveArt(s.id, bytes);
     }
