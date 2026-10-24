@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:math' show min;
+import 'dart:ui' as ui;
 
 import 'package:audio_metadata_reader/audio_metadata_reader.dart' as md;
 import 'package:file_picker/file_picker.dart';
@@ -73,10 +74,21 @@ class LocalCache {
     return File(p.join(_root!.path, dir, name));
   }
 
-  Future<String> saveArt(String id, List<int> bytes) async {
+  Future<String?> saveArt(String id, List<int> bytes) async {
+    if (bytes.isEmpty) return null;
     final file = await _file('art', '$id.img');
-    await _atomicBytes(file, bytes);
-    return file.path;
+    try {
+      await _atomicBytes(file, bytes);
+      return await validFile(file.path) ? file.path : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> removeArt(String id) async {
+    try {
+      await (await _file('art', '$id.img')).delete();
+    } catch (_) {}
   }
 
   Future<void> saveLyrics(String id, String? plain, String? synced) async {
@@ -140,6 +152,9 @@ class LocalCache {
     );
     try {
       await tmp.writeAsBytes(bytes, flush: true);
+      // Windows cannot replace an existing file with rename. Removing the old
+      // cache entry first still leaves a complete temporary file on failure.
+      if (Platform.isWindows && await file.exists()) await file.delete();
       await tmp.rename(file.path);
     } finally {
       if (await tmp.exists()) {
@@ -215,30 +230,138 @@ Future<Map<String, String?>?> _lookupMusicBrainz(
   }
 }
 
-Future<String?> _fetchItunesArt(String title, String artist) async {
+const _artAgent = 'SoundWave/1.0 (github.com/Havoczt/soundwave)';
+const _maxArtBytes = 12 * 1024 * 1024;
+
+class _ArtCandidate {
+  final String url;
+  final double score;
+  const _ArtCandidate(this.url, this.score);
+}
+
+String _artKey(String value) =>
+    _cleanTitle(value)
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+        .trim();
+
+double _artScore(
+  String title,
+  String artist,
+  String candidateTitle,
+  String candidateArtist,
+) {
+  final titleScore = _similarity(_artKey(title), _artKey(candidateTitle));
+  if (titleScore < 0.55) return 0;
+  if (artist == 'Unknown artist' || artist.trim().isEmpty) return titleScore;
+  final artistScore = _similarity(_artKey(artist), _artKey(candidateArtist));
+  if (artistScore < 0.45) return 0;
+  return titleScore * .7 + artistScore * .3;
+}
+
+String? _largeArtworkUrl(dynamic value) {
+  if (value is! String || value.trim().isEmpty) return null;
+  return value
+      .replaceAll('100x100bb', '600x600bb')
+      .replaceAll('200x200bb', '600x600bb')
+      .replaceAll('300x300bb', '600x600bb');
+}
+
+Future<List<_ArtCandidate>> _fetchItunesArts(
+  String title,
+  String artist,
+) async {
   try {
-    final q = Uri.encodeComponent('$title $artist');
+    final q = Uri.encodeComponent(
+      artist == 'Unknown artist' ? title : '$title $artist',
+    );
     final r = await http
         .get(
           Uri.parse(
-            'https://itunes.apple.com/search?term=$q&media=music&limit=1',
+            'https://itunes.apple.com/search?term=$q&media=music&entity=song&limit=10',
           ),
+          headers: {'User-Agent': _artAgent},
         )
-        .timeout(const Duration(seconds: 10));
-    if (r.statusCode != 200) return null;
-    final j = jsonDecode(r.body) as Map;
-    final results = j['results'] as List?;
-    if (results == null || results.isEmpty) return null;
-    final art = (results.first as Map)['artworkUrl100'] as String?;
-    if (art == null) return null;
-    return art.replaceAll('100x100bb', '600x600bb');
+        .timeout(const Duration(seconds: 8));
+    if (r.statusCode != 200) return [];
+    final results = (jsonDecode(r.body) as Map)['results'] as List?;
+    if (results == null) return [];
+    return [
+      for (final raw in results)
+        if (raw is Map)
+          if (_largeArtworkUrl(raw['artworkUrl100']) case final url?)
+            if (_artScore(
+                  title,
+                  artist,
+                  '${raw['trackName'] ?? ''}',
+                  '${raw['artistName'] ?? raw['collectionArtistName'] ?? ''}',
+                ) >=
+                .55)
+              _ArtCandidate(
+                url,
+                _artScore(
+                  title,
+                  artist,
+                  '${raw['trackName'] ?? ''}',
+                  '${raw['artistName'] ?? raw['collectionArtistName'] ?? ''}',
+                ),
+              ),
+    ]..sort((a, b) => b.score.compareTo(a.score));
   } catch (_) {
-    return null;
+    return [];
   }
 }
 
-// Last.fm: no API key needed for image lookup
-Future<String?> _fetchLastFmArt(String title, String artist) async {
+// Deezer has a public search endpoint and usually has better coverage than
+// iTunes for regional releases and older albums.
+Future<List<_ArtCandidate>> _fetchDeezerArts(
+  String title,
+  String artist,
+) async {
+  try {
+    final q = Uri.encodeComponent(
+      artist == 'Unknown artist' ? title : '$artist $title',
+    );
+    final r = await http
+        .get(
+          Uri.parse('https://api.deezer.com/search?q=$q&limit=10'),
+          headers: {'User-Agent': _artAgent},
+        )
+        .timeout(const Duration(seconds: 8));
+    if (r.statusCode != 200) return [];
+    final data = (jsonDecode(r.body) as Map)['data'] as List?;
+    if (data == null) return [];
+    return [
+      for (final raw in data)
+        if (raw is Map)
+          if (_largeArtworkUrl(raw['album']?['cover_xl']) case final url?)
+            if (_artScore(
+                  title,
+                  artist,
+                  '${raw['title'] ?? ''}',
+                  '${raw['artist']?['name'] ?? ''}',
+                ) >=
+                .55)
+              _ArtCandidate(
+                url,
+                _artScore(
+                  title,
+                  artist,
+                  '${raw['title'] ?? ''}',
+                  '${raw['artist']?['name'] ?? ''}',
+                ),
+              ),
+    ]..sort((a, b) => b.score.compareTo(a.score));
+  } catch (_) {
+    return [];
+  }
+}
+
+Future<List<_ArtCandidate>> _fetchLastFmArts(
+  String title,
+  String artist,
+) async {
+  if (artist == 'Unknown artist') return [];
   try {
     final t = Uri.encodeComponent(title);
     final a = Uri.encodeComponent(artist);
@@ -247,86 +370,136 @@ Future<String?> _fetchLastFmArt(String title, String artist) async {
           Uri.parse(
             'https://ws.audioscrobbler.com/2.0/?method=track.getInfo&api_key=43693facbb24d1ac893a5d813b137c15&track=$t&artist=$a&format=json',
           ),
+          headers: {'User-Agent': _artAgent},
         )
-        .timeout(const Duration(seconds: 10));
-    if (r.statusCode != 200) return null;
-    final j = jsonDecode(r.body) as Map;
-    final images = (j['track']?['album']?['image'] as List?);
-    if (images == null || images.isEmpty) return null;
-    // pick largest (last entry)
-    final url = images.last['#text'] as String?;
-    return (url != null && url.isNotEmpty) ? url : null;
+        .timeout(const Duration(seconds: 8));
+    if (r.statusCode != 200) return [];
+    final track = (jsonDecode(r.body) as Map)['track'] as Map?;
+    final images = track?['album']?['image'] as List?;
+    final foundTitle = '${track?['name'] ?? ''}';
+    final foundArtist = '${track?['artist']?['name'] ?? artist}';
+    final score = _artScore(title, artist, foundTitle, foundArtist);
+    if (score < .55 || images == null) return [];
+    final urls = <_ArtCandidate>[];
+    for (final image in images.reversed) {
+      if (image is Map) {
+        final url = _largeArtworkUrl(image['#text']);
+        if (url != null && !url.contains('2a96cbd8b46e442fc41c2b86b821562f')) {
+          urls.add(_ArtCandidate(url, score));
+        }
+      }
+    }
+    return urls;
   } catch (_) {
-    return null;
+    return [];
   }
 }
 
-// MusicBrainz release → Cover Art Archive
-Future<String?> _fetchCoverArtArchive(String title, String artist) async {
+// MusicBrainz release → Cover Art Archive. The archive is a useful final
+// fallback because it is community-curated and does not require an API key.
+Future<List<_ArtCandidate>> _fetchCoverArtArchive(
+  String title,
+  String artist,
+) async {
   try {
-    final q = Uri.encodeComponent('"$title" AND artist:"$artist"');
+    final q = Uri.encodeComponent(
+      artist == 'Unknown artist'
+          ? 'release:"$title"'
+          : 'release:"$title" AND artist:"$artist"',
+    );
     final mb = await http
         .get(
           Uri.parse(
-            'https://musicbrainz.org/ws/2/release/?query=$q&limit=1&fmt=json',
+            'https://musicbrainz.org/ws/2/release/?query=$q&limit=5&fmt=json',
           ),
-          headers: {
-            'User-Agent': 'SoundWave/1.0 (github.com/Havoczt/soundwave)',
-          },
+          headers: {'User-Agent': _artAgent},
         )
-        .timeout(const Duration(seconds: 10));
-    if (mb.statusCode != 200) return null;
+        .timeout(const Duration(seconds: 8));
+    if (mb.statusCode != 200) return [];
     final releases = (jsonDecode(mb.body) as Map)['releases'] as List?;
-    if (releases == null || releases.isEmpty) return null;
-    final mbid = releases.first['id'] as String?;
-    if (mbid == null) return null;
-    final ca = await http
-        .get(Uri.parse('https://coverartarchive.org/release/$mbid/front-500'))
-        .timeout(const Duration(seconds: 10));
-    if (ca.statusCode == 200 || ca.statusCode == 307) {
-      // http.get follows redirects, so the original endpoint is usable for
-      // both a direct 200 response and a redirected image response.
-      return ca.statusCode == 307
-          ? ca.headers['location']
-          : 'https://coverartarchive.org/release/$mbid/front-500';
+    if (releases == null) return [];
+    final candidates = <_ArtCandidate>[];
+    for (final raw in releases) {
+      if (raw is! Map) continue;
+      final mbid = raw['id'] as String?;
+      if (mbid == null) continue;
+      final ca = await http
+          .get(
+            Uri.parse('https://coverartarchive.org/release/$mbid/front-500'),
+            headers: {'User-Agent': _artAgent},
+          )
+          .timeout(const Duration(seconds: 8));
+      if (ca.statusCode == 200 || ca.statusCode == 307) {
+        candidates.add(
+          _ArtCandidate(
+            ca.statusCode == 307
+                ? (ca.headers['location'] ?? '')
+                : 'https://coverartarchive.org/release/$mbid/front-500',
+            .58,
+          ),
+        );
+      }
+      if (candidates.length >= 3) break;
     }
-    return null;
+    return candidates.where((c) => c.url.isNotEmpty).toList();
+  } catch (_) {
+    return [];
+  }
+}
+
+Future<bool> _isUsableArt(Uint8List bytes) async {
+  if (bytes.isEmpty || bytes.length > _maxArtBytes) return false;
+  try {
+    final codec = await ui
+        .instantiateImageCodec(bytes)
+        .timeout(const Duration(seconds: 5));
+    final frame = await codec.getNextFrame();
+    final width = frame.image.width;
+    final height = frame.image.height;
+    final valid =
+        width >= 64 && height >= 64 && width <= 4096 && height <= 4096;
+    frame.image.dispose();
+    codec.dispose();
+    return valid;
+  } catch (_) {
+    return false;
+  }
+}
+
+Future<Uint8List?> _downloadArt(String url) async {
+  try {
+    final r = await http
+        .get(Uri.parse(url), headers: {'User-Agent': _artAgent})
+        .timeout(const Duration(seconds: 12));
+    if (r.statusCode != 200 || r.bodyBytes.length > _maxArtBytes) return null;
+    final type = r.headers['content-type']?.toLowerCase() ?? '';
+    if (type.isNotEmpty &&
+        !type.startsWith('image/') &&
+        !type.contains('octet-stream'))
+      return null;
+    final bytes = Uint8List.fromList(r.bodyBytes);
+    return await _isUsableArt(bytes) ? bytes : null;
   } catch (_) {
     return null;
   }
 }
 
-// Try all art sources in order, return first hit as bytes
+// Query several independent catalogs, rank matches, and validate every image
+// before caching it. A bad response from one provider cannot block the others.
 Future<Uint8List?> _fetchArtBytes(String title, String artist) async {
-  // 1. iTunes
-  final itunesUrl = await _fetchItunesArt(title, artist);
-  if (itunesUrl != null) {
-    try {
-      final r = await http
-          .get(Uri.parse(itunesUrl))
-          .timeout(const Duration(seconds: 10));
-      if (r.statusCode == 200) return r.bodyBytes;
-    } catch (_) {}
-  }
-  // 2. Last.fm
-  final lfmUrl = await _fetchLastFmArt(title, artist);
-  if (lfmUrl != null) {
-    try {
-      final r = await http
-          .get(Uri.parse(lfmUrl))
-          .timeout(const Duration(seconds: 10));
-      if (r.statusCode == 200) return r.bodyBytes;
-    } catch (_) {}
-  }
-  // 3. Cover Art Archive (MusicBrainz)
-  final caUrl = await _fetchCoverArtArchive(title, artist);
-  if (caUrl != null && !caUrl.startsWith('coverartarchive:')) {
-    try {
-      final r = await http
-          .get(Uri.parse(caUrl))
-          .timeout(const Duration(seconds: 10));
-      if (r.statusCode == 200) return r.bodyBytes;
-    } catch (_) {}
+  final results = await Future.wait<List<_ArtCandidate>>([
+    _fetchItunesArts(title, artist),
+    _fetchDeezerArts(title, artist),
+    _fetchLastFmArts(title, artist),
+    _fetchCoverArtArchive(title, artist),
+  ]);
+  final candidates = [for (final source in results) ...source]
+    ..sort((a, b) => b.score.compareTo(a.score));
+  final tried = <String>{};
+  for (final candidate in candidates) {
+    if (!tried.add(candidate.url)) continue;
+    final bytes = await _downloadArt(candidate.url);
+    if (bytes != null) return bytes;
   }
   return null;
 }
@@ -521,6 +694,18 @@ class InvResult {
     required this.thumbnail,
     required this.lengthSeconds,
   });
+}
+
+class BatchDownloadTask {
+  final String id, query;
+  String status = 'Queued';
+  double progress = 0;
+  String? error;
+  InvResult? result;
+
+  BatchDownloadTask(this.id, this.query);
+
+  bool get finished => status == 'Complete' || status == 'Skipped';
 }
 
 Future<List<InvResult>> invSearch(String q) async {
@@ -772,6 +957,12 @@ class Store extends ChangeNotifier {
   String? busy, updateUrl, updateTag;
   double? updatePct;
   bool updating = false;
+  final List<BatchDownloadTask> batchQueue = [];
+  bool batchRunning = false;
+  int batchCompleted = 0;
+  int batchTotal = 0;
+  String? batchMessage;
+  Future<void>? _batchWorker;
   late SharedPreferences prefs;
   final cache = LocalCache();
   Timer? _saveTimer;
@@ -923,8 +1114,11 @@ class Store extends ChangeNotifier {
   }
 
   // ---- tags + album art
-  Future<String> _saveArt(String id, List<int> bytes) =>
-      cache.saveArt(id, bytes);
+  Future<String?> _saveArt(String id, List<int> bytes) async {
+    final imageBytes = Uint8List.fromList(bytes);
+    if (!await _isUsableArt(imageBytes)) return null;
+    return cache.saveArt(id, imageBytes);
+  }
 
   Future<void> _applyTags(Song s) async {
     try {
@@ -933,8 +1127,10 @@ class Store extends ChangeNotifier {
       if ((m.artist ?? '').trim().isNotEmpty) s.artist = m.artist!.trim();
       final d = m.duration;
       if (d != null) s.dur = d.inMilliseconds;
-      if (m.pictures.isNotEmpty)
-        s.art = await _saveArt(s.id, m.pictures.first.bytes);
+      if (m.pictures.isNotEmpty) {
+        final path = await _saveArt(s.id, m.pictures.first.bytes);
+        if (path != null) s.art = path;
+      }
     } catch (_) {}
   }
 
@@ -1107,6 +1303,9 @@ class Store extends ChangeNotifier {
       // the track is first played and must not delay queue insertion.
       await _applyTags(s);
       songs.insert(0, s);
+      // Batch downloads must finish enrichment before the next item starts so
+      // each imported track has artwork and cached lyrics when the queue ends.
+      await _enrich(s);
       touch();
       return '';
     } catch (e) {
@@ -1120,6 +1319,160 @@ class Store extends ChangeNotifier {
       }
       return 'Download failed: $e';
     }
+  }
+
+  // ---- playlist and batch download queue
+  bool _isPlaylistInput(String input) =>
+      input.contains('youtube.com/playlist') ||
+      (input.contains('youtube.com/watch') && input.contains('list=')) ||
+      (input.contains('youtu.be/') && input.contains('list='));
+
+  String _batchQuery(String line) {
+    final value = line.trim();
+    final match = RegExp(r'^(.*?)\s+[-–—|]\s+(.*?)$').firstMatch(value);
+    if (match == null) return value;
+    final left = match.group(1)!.trim();
+    final right = match.group(2)!.trim();
+    // Accept the common "Artist - Title" format while avoiding a second
+    // split for ordinary titles that contain a dash.
+    return left.split(RegExp(r'\s+')).length <= 6 ? '$left $right' : value;
+  }
+
+  Future<List<BatchDownloadTask>> _parseBatchInput(String input) async {
+    final value = input.trim();
+    if (value.isEmpty) return [];
+    if (_isPlaylistInput(value)) {
+      final tasks = <BatchDownloadTask>[];
+      var index = 0;
+      await for (final video in _yt.playlists.getVideos(value).take(200)) {
+        final result = InvResult(
+          videoId: video.id.value,
+          title: video.title,
+          author: video.author,
+          thumbnail: video.thumbnails.highResUrl,
+          lengthSeconds: video.duration?.inSeconds ?? 0,
+        );
+        final task = BatchDownloadTask('playlist-$index', video.title)
+          ..result = result;
+        tasks.add(task);
+        index++;
+      }
+      return tasks;
+    }
+
+    final lines = value
+        .split(RegExp(r'[\r\n]+'))
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .take(200)
+        .toList();
+    return [
+      for (var i = 0; i < lines.length; i++)
+        BatchDownloadTask(
+          'query-${DateTime.now().microsecondsSinceEpoch}-$i',
+          _batchQuery(lines[i]),
+        ),
+    ];
+  }
+
+  Future<String> startBatchDownload(String input) async {
+    if (input.trim().isEmpty) return 'Paste a playlist URL or song list first';
+    List<BatchDownloadTask> tasks;
+    try {
+      tasks = await _parseBatchInput(input);
+    } catch (e) {
+      return 'Could not read playlist: $e';
+    }
+    if (tasks.isEmpty) {
+      return _isPlaylistInput(input)
+          ? 'Playlist has no downloadable videos'
+          : 'No songs found in the list';
+    }
+    if (!batchRunning && batchQueue.every((task) => task.finished)) {
+      batchQueue.clear();
+      batchCompleted = 0;
+      batchTotal = 0;
+    }
+    batchQueue.addAll(tasks);
+    batchTotal += tasks.length;
+    batchMessage = 'Queued ${tasks.length} item${tasks.length == 1 ? '' : 's'}';
+    notifyListeners();
+
+    if (_batchWorker == null) {
+      final worker = _runBatchQueue();
+      _batchWorker = worker;
+      worker.whenComplete(() {
+        if (identical(_batchWorker, worker)) _batchWorker = null;
+      });
+    }
+    return batchMessage!;
+  }
+
+  Future<void> _runBatchQueue() async {
+    batchRunning = true;
+    notifyListeners();
+    try {
+      while (true) {
+        BatchDownloadTask? task;
+        for (final candidate in batchQueue) {
+          if (candidate.status == 'Queued') {
+            task = candidate;
+            break;
+          }
+        }
+        if (task == null) break;
+        task.status = 'Finding match';
+        task.progress = 0;
+        notifyListeners();
+        try {
+          if (task.result == null) {
+            final matches = await invSearch(task.query);
+            if (matches.isEmpty) {
+              task.status = 'Failed';
+              task.error = 'No YouTube match';
+              batchCompleted++;
+              notifyListeners();
+              continue;
+            }
+            task.result = matches.first;
+          }
+          final result = task.result!;
+          task.status = 'Downloading';
+          notifyListeners();
+          final error = await downloadFromInvidious(result, (progress) {
+            task!.progress = progress.clamp(0, 1).toDouble();
+            notifyListeners();
+          });
+          if (error.isEmpty) {
+            task.status = 'Complete';
+          } else if (error == 'Already in your library') {
+            task.status = 'Skipped';
+            task.error = error;
+          } else {
+            task.status = 'Failed';
+            task.error = error;
+          }
+        } catch (e) {
+          task.status = 'Failed';
+          task.error = '$e';
+        }
+        batchCompleted++;
+        notifyListeners();
+      }
+    } finally {
+      batchRunning = false;
+      batchMessage = 'Batch finished: $batchCompleted of $batchTotal processed';
+      notifyListeners();
+    }
+  }
+
+  void clearBatchQueue() {
+    if (batchRunning) return;
+    batchQueue.clear();
+    batchCompleted = 0;
+    batchTotal = 0;
+    batchMessage = null;
+    notifyListeners();
   }
 
   // ---- reset song back to file tags (clears any bad enrichment data)
@@ -1230,7 +1583,7 @@ class Store extends ChangeNotifier {
   }
 
   Future<String> addPicked() async {
-    final res = await FilePicker.platform.pickFiles(
+    final res = await FilePicker.pickFiles(
       type: FileType.audio,
       allowMultiple: true,
     );
@@ -1251,7 +1604,7 @@ class Store extends ChangeNotifier {
       openAppSettings();
       return 'Allow "Music and audio" access for SoundWave, then try again';
     }
-    final dir = await FilePicker.platform.getDirectoryPath();
+    final dir = await FilePicker.getDirectoryPath();
     if (dir == null) return '';
     if (!folders.contains(dir)) folders.add(dir);
     return _rescan([dir]);
@@ -1307,9 +1660,13 @@ class Store extends ChangeNotifier {
   // ---- playback
   Future<void> play(List<Song> list, int i) async {
     queue = list;
-    // Auto-enrich on play if artist unknown or lyrics missing
+    // Retry enrichment when art is missing as well as when metadata or lyrics
+    // are incomplete. This repairs transient catalog/network failures on the
+    // next play instead of leaving a track permanently art-less.
     final s = list[i];
+    final artMissing = s.art == null || !await LocalCache.validFile(s.art);
     if (s.artist == 'Unknown artist' ||
+        artMissing ||
         (s.lyrics == null && s.syncedLyrics == null)) {
       _enrich(s).then((_) {
         save();
@@ -1842,16 +2199,28 @@ class _HomeState extends State<Home> {
         _run(store.refreshTags());
       } else if (v == 'enrich') {
         _run(store.reenrichAll());
+      } else if (v == 'batch') {
+        _openBatchImport();
       }
     },
     itemBuilder: (_) => const [
       PopupMenuItem(value: 'add', child: Text('Add songs')),
+      PopupMenuItem(value: 'batch', child: Text('Import playlist or batch')),
       PopupMenuItem(value: 'scan', child: Text('Scan a folder')),
       PopupMenuItem(value: 'rescan', child: Text('Rescan saved folders')),
       PopupMenuItem(value: 'tags', child: Text('Refresh album art & tags')),
       PopupMenuItem(value: 'enrich', child: Text('Refresh lyrics & artist')),
     ],
   );
+
+  void _openBatchImport() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF121212),
+      builder: (_) => const _BatchImportSheet(),
+    );
+  }
 
   void _openSearch() {
     showModalBottomSheet(
@@ -1862,6 +2231,65 @@ class _HomeState extends State<Home> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (_) => const _SearchSheet(),
+    );
+  }
+
+  Widget _batchProgress() {
+    if (store.batchQueue.isEmpty) return const SizedBox.shrink();
+    final done = store.batchCompleted;
+    final total = store.batchTotal;
+    final active = store.batchQueue.where(
+      (task) => task.status == 'Finding match' || task.status == 'Downloading',
+    );
+    final current = active.isNotEmpty ? active.first : store.batchQueue.last;
+    final overall = total == 0 ? 0.0 : done / total;
+    return Card(
+      color: const Color(0xFF222222),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.queue_music, color: green),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    store.batchRunning ? 'Batch downloads' : 'Batch complete',
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+                Text(
+                  '$done/$total',
+                  style: const TextStyle(color: Colors.white54),
+                ),
+                if (!store.batchRunning)
+                  IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    onPressed: store.clearBatchQueue,
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            LinearProgressIndicator(value: store.batchRunning ? overall : 1),
+            const SizedBox(height: 6),
+            Text(
+              store.batchRunning
+                  ? '${current.status}: ${current.query}'
+                  : (store.batchMessage ?? 'Finished'),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+            if (store.batchRunning && current.status == 'Downloading')
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: LinearProgressIndicator(value: current.progress),
+              ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1902,6 +2330,7 @@ class _HomeState extends State<Home> {
           ),
         ),
         const SizedBox(height: 16),
+        _batchProgress(),
         if (songs.isNotEmpty)
           GridView.count(
             crossAxisCount: 2,
@@ -2321,6 +2750,105 @@ class _HomeState extends State<Home> {
           ),
         );
       },
+    );
+  }
+}
+
+// ---------------------------------------------------------------- batch import sheet
+class _BatchImportSheet extends StatefulWidget {
+  const _BatchImportSheet();
+  @override
+  State<_BatchImportSheet> createState() => _BatchImportSheetState();
+}
+
+class _BatchImportSheetState extends State<_BatchImportSheet> {
+  final _ctl = TextEditingController();
+  bool _loading = false;
+  String _error = '';
+
+  Future<void> _queue() async {
+    final input = _ctl.text.trim();
+    if (input.isEmpty) return;
+    setState(() {
+      _loading = true;
+      _error = '';
+    });
+    final message = await store.startBatchDownload(input);
+    if (!mounted) return;
+    setState(() => _loading = false);
+    if (store.batchQueue.isNotEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
+      Navigator.pop(context);
+    } else {
+      setState(() => _error = message);
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottom = MediaQuery.viewInsetsOf(context).bottom;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(20, 20, 20, bottom + 20),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Import playlist or batch',
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Paste a public YouTube playlist URL, or one song per line. '
+              'Use “Artist - Title” for the best metadata match.',
+              style: TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _ctl,
+              autofocus: true,
+              minLines: 4,
+              maxLines: 12,
+              keyboardType: TextInputType.multiline,
+              decoration: InputDecoration(
+                hintText: 'https://www.youtube.com/playlist?list=…\n\nArtist - Song title\nAnother artist - Another song',
+                filled: true,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+            if (_error.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(_error, style: const TextStyle(color: Colors.redAccent)),
+            ],
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: _loading ? null : _queue,
+                icon: _loading
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.playlist_add),
+                label: Text(_loading ? 'Reading playlist…' : 'Queue downloads'),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
