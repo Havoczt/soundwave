@@ -45,9 +45,23 @@ final _paletteCache = <String, Color>{};
 /// Writes are atomic so a process kill cannot leave a half-written cache file.
 class LocalCache {
   Directory? _root;
+  Future<void>? _initFuture;
 
   Future<void> init() async {
-    _root ??= Directory(
+    final pending = _initFuture;
+    if (pending != null) return pending;
+    final future = _initialize();
+    _initFuture = future;
+    try {
+      await future;
+    } catch (_) {
+      _initFuture = null;
+      rethrow;
+    }
+  }
+
+  Future<void> _initialize() async {
+    _root = Directory(
       p.join((await getApplicationDocumentsDirectory()).path, 'cache'),
     );
     await Directory(p.join(_root!.path, 'art')).create(recursive: true);
@@ -91,6 +105,12 @@ class LocalCache {
       } catch (_) {}
       return null;
     }
+  }
+
+  Future<void> removeLyrics(String id) async {
+    try {
+      await (await _file('lyrics', '$id.json')).delete();
+    } catch (_) {}
   }
 
   Future<void> remove(String id) async {
@@ -942,9 +962,10 @@ class Store extends ChangeNotifier {
       busy = 'Fetching lyrics & artist ${i + 1} of ${songs.length}…';
       notifyListeners();
       await Future.delayed(Duration.zero);
-      // Clear lyrics so they get re-fetched
+      // Clear both in-memory and disk lyrics so they get re-fetched.
       songs[i].lyrics = null;
       songs[i].syncedLyrics = null;
+      await cache.removeLyrics(songs[i].id);
       await _enrich(songs[i]);
     }
     busy = null;
@@ -1091,9 +1112,10 @@ class Store extends ChangeNotifier {
     }
     // Override with actual embedded tags if present
     await _applyTags(s);
-    // Clear lyrics so they re-fetch with correct metadata
+    // Clear lyrics in memory and on disk so they re-fetch with correct metadata.
     s.lyrics = null;
     s.syncedLyrics = null;
+    await cache.removeLyrics(s.id);
     s.art = null;
     save();
     notifyListeners();
@@ -1108,7 +1130,7 @@ class Store extends ChangeNotifier {
   Future<void> editSongInfo(Song s, String newTitle, String newArtist) async {
     s.title = newTitle.trim().isEmpty ? s.title : newTitle.trim();
     s.artist = newArtist.trim().isEmpty ? s.artist : newArtist.trim();
-    // Clear art, lyrics so they all re-fetch with the corrected metadata
+    // Clear art and lyrics so they all re-fetch with the corrected metadata.
     if (s.art != null) {
       try {
         await File(s.art!).delete();
@@ -1117,6 +1139,7 @@ class Store extends ChangeNotifier {
     }
     s.lyrics = null;
     s.syncedLyrics = null;
+    await cache.removeLyrics(s.id);
     save();
     notifyListeners();
     // Re-fetch in background
