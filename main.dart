@@ -1327,6 +1327,83 @@ class Store extends ChangeNotifier {
       (input.contains('youtube.com/watch') && input.contains('list=')) ||
       (input.contains('youtu.be/') && input.contains('list='));
 
+  bool _isSpotifyPlaylist(String input) =>
+      input.contains('open.spotify.com/playlist/') ||
+      input.contains('spotify.com/playlist/') ||
+      input.contains('spotify:playlist:');
+
+  Future<List<Map<String, String>>> _fetchSpotifyPlaylist(String url) async {
+    try {
+      // Extract playlist ID from various Spotify URL formats
+      final idMatch = RegExp(
+        r'(?:open\.spotify\.com/playlist/|spotify\.com/playlist/|spotify:playlist:)([a-zA-Z0-9]+)',
+      ).firstMatch(url);
+      if (idMatch == null) return [];
+
+      final playlistId = idMatch.group(1)!;
+      final pageUrl = 'https://open.spotify.com/playlist/$playlistId';
+
+      // Fetch the public playlist page
+      final response = await http
+          .get(Uri.parse(pageUrl))
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) return [];
+
+      // Parse JSON-LD structured data embedded in the page
+      final jsonLdMatch = RegExp(
+        r'<script type="application/ld\+json">(.+?)</script>',
+        dotAll: true,
+      ).firstMatch(response.body);
+
+      if (jsonLdMatch != null) {
+        try {
+          final data = jsonDecode(jsonLdMatch.group(1)!) as Map;
+          if (data['@type'] == 'MusicPlaylist') {
+            final tracks = (data['track'] as List?) ?? [];
+            return [
+              for (final track in tracks.take(200))
+                if (track is Map)
+                  {
+                    'title': '${track['name'] ?? ''}',
+                    'artist':
+                        '${(track['byArtist'] as Map?)?['name'] ?? 'Unknown'}',
+                  },
+            ];
+          }
+        } catch (_) {}
+      }
+
+      // Fallback: extract from embedded Spotify state JSON
+      final stateMatch = RegExp(
+        r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>',
+      ).firstMatch(response.body);
+
+      if (stateMatch != null) {
+        try {
+          final state = jsonDecode(stateMatch.group(1)!) as Map;
+          final entities =
+              state['props']?['pageProps']?['state']?['data']?['entity']
+                  as Map?;
+          final trackList = entities?['trackList'] as List?;
+          if (trackList != null) {
+            return [
+              for (final item in trackList.take(200))
+                if (item is Map && item['isAvailable'] == true)
+                  {
+                    'title': '${item['name'] ?? ''}',
+                    'artist': '${item['artists']?.first?['name'] ?? 'Unknown'}',
+                  },
+            ];
+          }
+        } catch (_) {}
+      }
+
+      return [];
+    } catch (_) {
+      return [];
+    }
+  }
+
   String _batchQuery(String line) {
     final value = line.trim();
     final match = RegExp(r'^(.*?)\s+[-–—|]\s+(.*?)$').firstMatch(value);
@@ -1341,6 +1418,8 @@ class Store extends ChangeNotifier {
   Future<List<BatchDownloadTask>> _parseBatchInput(String input) async {
     final value = input.trim();
     if (value.isEmpty) return [];
+
+    // YouTube playlist
     if (_isPlaylistInput(value)) {
       final tasks = <BatchDownloadTask>[];
       var index = 0;
@@ -1360,6 +1439,20 @@ class Store extends ChangeNotifier {
       return tasks;
     }
 
+    // Spotify playlist
+    if (_isSpotifyPlaylist(value)) {
+      final tracks = await _fetchSpotifyPlaylist(value);
+      if (tracks.isEmpty) return [];
+      return [
+        for (var i = 0; i < tracks.length; i++)
+          BatchDownloadTask(
+            'spotify-$i',
+            '${tracks[i]['artist']} - ${tracks[i]['title']}',
+          ),
+      ];
+    }
+
+    // Newline-separated song list
     final lines = value
         .split(RegExp(r'[\r\n]+'))
         .map((line) => line.trim())
@@ -1384,8 +1477,8 @@ class Store extends ChangeNotifier {
       return 'Could not read playlist: $e';
     }
     if (tasks.isEmpty) {
-      return _isPlaylistInput(input)
-          ? 'Playlist has no downloadable videos'
+      return _isPlaylistInput(input) || _isSpotifyPlaylist(input)
+          ? 'Playlist has no downloadable tracks'
           : 'No songs found in the list';
     }
     if (!batchRunning && batchQueue.every((task) => task.finished)) {
@@ -2807,7 +2900,7 @@ class _BatchImportSheetState extends State<_BatchImportSheet> {
             ),
             const SizedBox(height: 8),
             const Text(
-              'Paste a public YouTube playlist URL, or one song per line. '
+              'Paste a public YouTube or Spotify playlist URL, or one song per line. '
               'Use “Artist - Title” for the best metadata match.',
               style: TextStyle(color: Colors.white70),
             ),
@@ -2819,7 +2912,7 @@ class _BatchImportSheetState extends State<_BatchImportSheet> {
               maxLines: 12,
               keyboardType: TextInputType.multiline,
               decoration: InputDecoration(
-                hintText: 'https://www.youtube.com/playlist?list=…\n\nArtist - Song title\nAnother artist - Another song',
+                hintText: 'https://www.youtube.com/playlist?list=…\nhttps://open.spotify.com/playlist/…\n\nArtist - Song title\nAnother artist - Another song',
                 filled: true,
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
