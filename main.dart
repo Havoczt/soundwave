@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:math' show min;
 import 'package:audio_metadata_reader/audio_metadata_reader.dart' as md;
 import 'package:file_picker/file_picker.dart';
@@ -82,11 +83,86 @@ Future<String?> _fetchItunesArt(String title, String artist) async {
     if (results == null || results.isEmpty) return null;
     final art = (results.first as Map)['artworkUrl100'] as String?;
     if (art == null) return null;
-    // get higher res version
     return art.replaceAll('100x100bb', '600x600bb');
   } catch (_) {
     return null;
   }
+}
+
+// Last.fm: no API key needed for image lookup
+Future<String?> _fetchLastFmArt(String title, String artist) async {
+  try {
+    final t = Uri.encodeComponent(title);
+    final a = Uri.encodeComponent(artist);
+    final r = await http.get(Uri.parse(
+      'https://ws.audioscrobbler.com/2.0/?method=track.getInfo&api_key=43693facbb24d1ac893a5d813b137c15&track=$t&artist=$a&format=json',
+    )).timeout(const Duration(seconds: 10));
+    if (r.statusCode != 200) return null;
+    final j = jsonDecode(r.body) as Map;
+    final images = (j['track']?['album']?['image'] as List?);
+    if (images == null || images.isEmpty) return null;
+    // pick largest (last entry)
+    final url = images.last['#text'] as String?;
+    return (url != null && url.isNotEmpty) ? url : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// MusicBrainz release → Cover Art Archive
+Future<String?> _fetchCoverArtArchive(String title, String artist) async {
+  try {
+    final q = Uri.encodeComponent('"$title" AND artist:"$artist"');
+    final mb = await http.get(
+      Uri.parse('https://musicbrainz.org/ws/2/release/?query=$q&limit=1&fmt=json'),
+      headers: {'User-Agent': 'SoundWave/1.0 (github.com/Havoczt/soundwave)'},
+    ).timeout(const Duration(seconds: 10));
+    if (mb.statusCode != 200) return null;
+    final releases = (jsonDecode(mb.body) as Map)['releases'] as List?;
+    if (releases == null || releases.isEmpty) return null;
+    final mbid = releases.first['id'] as String?;
+    if (mbid == null) return null;
+    final ca = await http.get(
+      Uri.parse('https://coverartarchive.org/release/$mbid/front-500'),
+    ).timeout(const Duration(seconds: 10));
+    if (ca.statusCode == 200 || ca.statusCode == 307) {
+      // 307 redirect — follow it
+      final loc = ca.headers['location'];
+      return loc ?? (ca.statusCode == 200 ? 'coverartarchive:$mbid' : null);
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Try all art sources in order, return first hit as bytes
+Future<Uint8List?> _fetchArtBytes(String title, String artist) async {
+  // 1. iTunes
+  final itunesUrl = await _fetchItunesArt(title, artist);
+  if (itunesUrl != null) {
+    try {
+      final r = await http.get(Uri.parse(itunesUrl)).timeout(const Duration(seconds: 10));
+      if (r.statusCode == 200) return r.bodyBytes;
+    } catch (_) {}
+  }
+  // 2. Last.fm
+  final lfmUrl = await _fetchLastFmArt(title, artist);
+  if (lfmUrl != null) {
+    try {
+      final r = await http.get(Uri.parse(lfmUrl)).timeout(const Duration(seconds: 10));
+      if (r.statusCode == 200) return r.bodyBytes;
+    } catch (_) {}
+  }
+  // 3. Cover Art Archive (MusicBrainz)
+  final caUrl = await _fetchCoverArtArchive(title, artist);
+  if (caUrl != null && !caUrl.startsWith('coverartarchive:')) {
+    try {
+      final r = await http.get(Uri.parse(caUrl)).timeout(const Duration(seconds: 10));
+      if (r.statusCode == 200) return r.bodyBytes;
+    } catch (_) {}
+  }
+  return null;
 }
 
 // Fuzzy string similarity: ratio of common chars to max length (0..1)
@@ -577,13 +653,8 @@ class Store extends ChangeNotifier {
     // Mark song as needing manual tag fix if artist still unknown
     s.tagsBad = s.artist == 'Unknown artist';
     if (s.art == null) {
-      final artUrl = await _fetchItunesArt(s.title, s.artist);
-      if (artUrl != null) {
-        try {
-          final r = await http.get(Uri.parse(artUrl)).timeout(const Duration(seconds: 10));
-          if (r.statusCode == 200) s.art = await _saveArt(s.id, r.bodyBytes);
-        } catch (_) {}
-      }
+      final bytes = await _fetchArtBytes(s.title, s.artist);
+      if (bytes != null) s.art = await _saveArt(s.id, bytes);
     }
     // Feature 2b: fetch both plain and synced lyrics
     final lyricsMap = await _fetchLrcLibLyrics(s.title, s.artist, durMs: s.dur);
