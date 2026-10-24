@@ -1583,12 +1583,12 @@ class Store extends ChangeNotifier {
   }
 
   Future<String> addPicked() async {
-    final res = await FilePicker.pickFiles(
+    final res = await FilePicker.platform.pickFiles(
       type: FileType.audio,
       allowMultiple: true,
     );
     if (res == null) return '';
-    final items = [
+    final items = <MapEntry<String, String>>[
       for (final f in res.files)
         if (f.path != null) MapEntry(f.path!, f.name),
     ];
@@ -1604,7 +1604,7 @@ class Store extends ChangeNotifier {
       openAppSettings();
       return 'Allow "Music and audio" access for SoundWave, then try again';
     }
-    final dir = await FilePicker.getDirectoryPath();
+    final dir = await FilePicker.platform.getDirectoryPath();
     if (dir == null) return '';
     if (!folders.contains(dir)) folders.add(dir);
     return _rescan([dir]);
