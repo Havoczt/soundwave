@@ -857,6 +857,10 @@ Future<void> main() async {
     androidNotificationChannelId: 'com.soundwave.audio',
     androidNotificationChannelName: 'SoundWave playback',
     androidNotificationOngoing: true,
+    androidStopForegroundOnPause: true,
+    androidNotificationIcon: 'drawable/ic_notification',
+    artDownscaleWidth: 300,
+    artDownscaleHeight: 300,
   );
   await store.load();
   runApp(const SoundWaveApp());
@@ -1766,9 +1770,11 @@ class Store extends ChangeNotifier {
     if (s.artist == 'Unknown artist' ||
         artMissing ||
         (s.lyrics == null && s.syncedLyrics == null)) {
-      _enrich(s).then((_) {
+      _enrich(s).then((_) async {
         save();
         notifyListeners();
+        // Refresh notification art after enrich — rebuild queue in place
+        await _refreshCurrentMediaItem();
       });
     }
     // Feature 1: track recently played
@@ -1811,6 +1817,35 @@ class Store extends ChangeNotifier {
           }
         })
         .catchError((_) {});
+  }
+
+  // Rebuild the player's audio source in-place so the notification picks up
+  // updated art/title after enrichment, without audible interruption.
+  Future<void> _refreshCurrentMediaItem() async {
+    final idx = player.currentIndex;
+    if (idx == null || idx >= queue.length) return;
+    final pos = player.position;
+    final wasPlaying = player.playing;
+    await player.setAudioSource(
+      ConcatenatingAudioSource(
+        children: [
+          for (final s in queue)
+            AudioSource.file(
+              s.path,
+              tag: MediaItem(
+                id: s.id,
+                title: s.title,
+                artist: s.artist,
+                artUri: s.art != null ? Uri.file(s.art!) : null,
+                duration: s.dur > 0 ? Duration(milliseconds: s.dur) : null,
+              ),
+            ),
+        ],
+      ),
+      initialIndex: idx,
+      initialPosition: pos,
+    );
+    if (wasPlaying) player.play();
   }
 
   void toggleShuffle() {
