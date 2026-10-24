@@ -284,9 +284,11 @@ Future<String?> _fetchCoverArtArchive(String title, String artist) async {
         .get(Uri.parse('https://coverartarchive.org/release/$mbid/front-500'))
         .timeout(const Duration(seconds: 10));
     if (ca.statusCode == 200 || ca.statusCode == 307) {
-      // 307 redirect — follow it
-      final loc = ca.headers['location'];
-      return loc ?? (ca.statusCode == 200 ? 'coverartarchive:$mbid' : null);
+      // http.get follows redirects, so the original endpoint is usable for
+      // both a direct 200 response and a redirected image response.
+      return ca.statusCode == 307
+          ? ca.headers['location']
+          : 'https://coverartarchive.org/release/$mbid/front-500';
     }
     return null;
   } catch (_) {
@@ -553,37 +555,45 @@ const _invHosts = [
 
 String _lastStreamError = '';
 
-Future<http.StreamedResponse?> _openAudioStream(String videoId) async {
+class _AudioStream {
+  final http.StreamedResponse response;
+  final http.Client client;
+  const _AudioStream(this.response, this.client);
+}
+
+Future<_AudioStream?> _openAudioStream(String videoId) async {
   final failures = <String>[];
   // Primary: our own yt-dlp backend. yt-dlp gets updated almost daily to
   // counter YouTube's anti-bot changes — far more reliable than any in-app
   // extraction library. Server proxies the audio bytes through itself.
   if (kYtApiBase.isNotEmpty) {
+    final client = http.Client();
     try {
       final url = Uri.parse('$kYtApiBase/audio?id=$videoId&key=$kYtApiKey');
-      final client = http.Client();
       final resp = await client
           .send(http.Request('GET', url))
           .timeout(const Duration(seconds: 12));
-      if (resp.statusCode == 200) return resp;
+      if (resp.statusCode == 200) return _AudioStream(resp, client);
       failures.add('ytapi:${resp.statusCode}');
       client.close();
     } catch (e) {
+      client.close();
       failures.add('ytapi:${e.runtimeType}');
     }
   }
   // Fallback: Invidious instances — 5s connection timeout so we don't hang on a dead host
   for (final host in _invHosts) {
+    final client = http.Client();
     try {
       final url = Uri.parse('$host/latest_version?id=$videoId&itag=140');
-      final client = http.Client();
       final resp = await client
           .send(http.Request('GET', url))
           .timeout(const Duration(seconds: 5));
-      if (resp.statusCode == 200) return resp;
+      if (resp.statusCode == 200) return _AudioStream(resp, client);
       failures.add('$host:${resp.statusCode}');
       client.close();
     } catch (e) {
+      client.close();
       failures.add('$host:${e.runtimeType}');
     }
   }
@@ -603,12 +613,17 @@ Future<http.StreamedResponse?> _openAudioStream(String videoId) async {
     } else {
       final best = m4aStreams.withHighestBitrate();
       final client = http.Client();
-      final resp = await client
-          .send(http.Request('GET', best.url))
-          .timeout(const Duration(seconds: 10));
-      if (resp.statusCode == 200) return resp;
-      failures.add('yt-explode:${resp.statusCode}');
-      client.close();
+      try {
+        final resp = await client
+            .send(http.Request('GET', best.url))
+            .timeout(const Duration(seconds: 10));
+        if (resp.statusCode == 200) return _AudioStream(resp, client);
+        failures.add('yt-explode:${resp.statusCode}');
+        client.close();
+      } catch (_) {
+        client.close();
+        rethrow;
+      }
     }
   } catch (e) {
     failures.add('yt-explode:${e.runtimeType}:$e');
@@ -994,13 +1009,15 @@ class Store extends ChangeNotifier {
       // Re-open the stream after a transient network failure. A partial file
       // is never added to the library and is removed before the next attempt.
       for (var attempt = 1; attempt <= 3; attempt++) {
-        final resp = await _openAudioStream(result.videoId);
-        if (resp == null) {
+        final audio = await _openAudioStream(result.videoId);
+        if (audio == null) {
           if (attempt == 3)
             return 'Could not get audio stream ($_lastStreamError)';
           await Future.delayed(Duration(seconds: attempt * 2));
           continue;
         }
+        final resp = audio.response;
+        final client = audio.client;
         final ext = '.${resp.headers['x-audio-ext'] ?? 'm4a'}';
         path = p.join(dir.path, '$id$ext');
         final total = resp.contentLength ?? 0;
@@ -1021,8 +1038,10 @@ class Store extends ChangeNotifier {
           sink = null;
           // Rename only after the complete stream has been flushed.
           await File(tempPath).rename(path);
+          client.close();
           break;
         } catch (_) {
+          client.close();
           try {
             await sink?.close();
           } catch (_) {}
@@ -1037,6 +1056,11 @@ class Store extends ChangeNotifier {
       }
       final completedPath = path;
       if (completedPath == null || !await LocalCache.validFile(completedPath)) {
+        if (completedPath != null) {
+          try {
+            await File(completedPath).delete();
+          } catch (_) {}
+        }
         return 'Download did not complete';
       }
       // Parse title/artist from result
