@@ -3481,6 +3481,8 @@ class _NowPlayingState extends State<NowPlaying> {
                         ),
                         // Feature 3: always show lyrics chip; fetch on demand if not loaded
                         _LyricsChip(s: s),
+                        // Feature 9: artist bio via Last.fm
+                        _BioChip(s: s),
                       ],
                     ),
                   ],
@@ -3554,6 +3556,174 @@ class _LyricsChipState extends State<_LyricsChip> {
           : const Icon(Icons.lyrics_outlined, size: 18),
       label: const Text('Lyrics'),
       onPressed: _fetching ? null : _fetchAndOpen,
+    );
+  }
+}
+
+// Feature 9: Artist bio via Last.fm
+Future<Map<String, dynamic>?> _fetchArtistBio(String artist) async {
+  if (artist == 'Unknown artist' || artist.trim().isEmpty) return null;
+  try {
+    final a = Uri.encodeComponent(artist);
+    final uri = Uri.parse(
+      'https://ws.audioscrobbler.com/2.0/?method=artist.getInfo&artist=$a&api_key=43693facbb24d1ac893a5d813b137c15&format=json&autocorrect=1',
+    );
+    final res = await http.get(uri).timeout(const Duration(seconds: 10));
+    if (res.statusCode != 200) return null;
+    final j = jsonDecode(res.body) as Map<String, dynamic>;
+    final art = j['artist'] as Map<String, dynamic>?;
+    if (art == null) return null;
+    var bio = ((art['bio'] as Map?)?['summary'] as String? ?? '').trim();
+    // Strip Last.fm "Read more on Last.fm" link
+    bio = bio.replaceAll(RegExp(r'<a[^>]*>.*?</a>', dotAll: true), '').trim();
+    bio = bio.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final tags = ((art['tags'] as Map?)?['tag'] as List? ?? [])
+        .map((t) => (t as Map)['name'] as String? ?? '')
+        .where((t) => t.isNotEmpty)
+        .take(5)
+        .toList();
+    final listeners = art['stats']?['listeners'] as String?;
+    final playcount = art['stats']?['playcount'] as String?;
+    return {
+      'bio': bio.isEmpty ? null : bio,
+      'tags': tags,
+      'listeners': listeners,
+      'playcount': playcount,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+class _BioChip extends StatefulWidget {
+  final Song s;
+  const _BioChip({required this.s});
+  @override
+  State<_BioChip> createState() => _BioChipState();
+}
+
+class _BioChipState extends State<_BioChip> {
+  bool _fetching = false;
+
+  Future<void> _fetchAndOpen() async {
+    final s = widget.s;
+    if (s.artist == 'Unknown artist') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Fix artist name first to load bio')),
+      );
+      return;
+    }
+    setState(() => _fetching = true);
+    final data = await _fetchArtistBio(s.artist);
+    if (!mounted) return;
+    setState(() => _fetching = false);
+    if (data == null || (data['bio'] == null && (data['tags'] as List).isEmpty)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No bio found for ${s.artist}')),
+      );
+      return;
+    }
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1A1A1A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => _ArtistBioSheet(artist: s.artist, data: data),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ActionChip(
+      avatar: _fetching
+          ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2, color: green),
+            )
+          : const Icon(Icons.person_outline, size: 18),
+      label: const Text('Artist'),
+      onPressed: _fetching ? null : _fetchAndOpen,
+    );
+  }
+}
+
+class _ArtistBioSheet extends StatelessWidget {
+  final String artist;
+  final Map<String, dynamic> data;
+  const _ArtistBioSheet({required this.artist, required this.data});
+
+  String _fmt(String? n) {
+    if (n == null) return '';
+    final v = int.tryParse(n);
+    if (v == null) return n;
+    if (v >= 1000000) return '${(v / 1000000).toStringAsFixed(1)}M';
+    if (v >= 1000) return '${(v / 1000).toStringAsFixed(0)}K';
+    return n;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bio = data['bio'] as String?;
+    final tags = (data['tags'] as List).cast<String>();
+    final listeners = _fmt(data['listeners'] as String?);
+    final playcount = _fmt(data['playcount'] as String?);
+    return DraggableScrollableSheet(
+      initialChildSize: 0.6,
+      minChildSize: 0.4,
+      maxChildSize: 0.92,
+      expand: false,
+      builder: (_, sc) => ListView(
+        controller: sc,
+        padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
+        children: [
+          Center(
+            child: Container(
+              width: 40, height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            artist,
+            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+          ),
+          if (listeners.isNotEmpty || playcount.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              [
+                if (listeners.isNotEmpty) '$listeners listeners',
+                if (playcount.isNotEmpty) '$playcount plays',
+              ].join('  ·  '),
+              style: const TextStyle(color: Colors.white54, fontSize: 13),
+            ),
+          ],
+          if (tags.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: tags
+                  .map((t) => Chip(
+                        label: Text(t, style: const TextStyle(fontSize: 12)),
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        padding: EdgeInsets.zero,
+                        visualDensity: VisualDensity.compact,
+                      ))
+                  .toList(),
+            ),
+          ],
+          if (bio != null) ...[
+            const SizedBox(height: 16),
+            Text(bio, style: const TextStyle(fontSize: 14, height: 1.6, color: Colors.white70)),
+          ],
+        ],
+      ),
     );
   }
 }
