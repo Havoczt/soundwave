@@ -723,20 +723,38 @@ Future<List<InvResult>> invSearch(String q) async {
       .toList();
 }
 
-// Download audio via Invidious /latest_version (itag 140 = m4a 128kbps).
-// Much faster than youtube_explode_dart's streamsClient.get() which does
-// sequential chunked requests and JS decipher — Invidious handles all that
-// server-side and gives us a plain HTTP stream.
-// Tries multiple public instances; falls back to yt-explode if all fail.
-// Official community-approved list (api.invidious.io) as of late 2026 — the
-// old hardcoded list had dead/untrusted hosts, which is why downloads hung.
+// ── Audio stream pipeline ────────────────────────────────────────────────────
+// Priority order:
+//   1. Self-hosted yt-dlp backend  (most reliable — updated daily vs YT)
+//   2. Invidious public instances  (fast when alive — server-side extraction)
+//   3. Piped API instances         (separate infra from Invidious)
+//   4. youtube_explode_dart        (pure-Dart fallback — m4a then opus/webm)
+//
+// Dead-host blacklist: any host that fails is skipped for the rest of the
+// app session, so subsequent downloads don't burn time on known-dead servers.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Invidious: official list from api.invidious.io (https-only, api=true)
 const _invHosts = [
   'https://inv.nadeko.net',
   'https://invidious.nerdvpn.de',
   'https://invidious.tiekoetter.com',
   'https://invidious.f5.si',
   'https://yt.chocolatemoo53.com',
+  'https://invidious.privacyredirect.com',
+  'https://invidious.lunar.icu',
+  'https://invidious.io.lol',
 ];
+
+// Piped: alternative YT frontend with independent infra — different failure modes
+const _pipedHosts = [
+  'https://pipedapi.kavin.rocks',
+  'https://pipedapi.adminforge.de',
+  'https://pipedapi.drgns.space',
+];
+
+// Session-scoped dead host blacklist — reset on app restart
+final _deadHosts = <String>{};
 
 String _lastStreamError = '';
 
@@ -746,18 +764,39 @@ class _AudioStream {
   const _AudioStream(this.response, this.client);
 }
 
+// Try a single HTTP GET, return stream or null. Marks host dead on failure.
+Future<_AudioStream?> _tryGet(String urlStr, {int timeoutSec = 6}) async {
+  final uri = Uri.parse(urlStr);
+  final host = '${uri.scheme}://${uri.host}';
+  if (_deadHosts.contains(host)) return null;
+  final client = http.Client();
+  try {
+    final resp = await client
+        .send(http.Request('GET', uri))
+        .timeout(Duration(seconds: timeoutSec));
+    if (resp.statusCode == 200) return _AudioStream(resp, client);
+    client.close();
+    // 4xx = instance is alive but rejected us — don't blacklist
+    if (resp.statusCode >= 500) _deadHosts.add(host);
+    return null;
+  } catch (_) {
+    client.close();
+    _deadHosts.add(host); // timeout / connection refused — host is dead
+    return null;
+  }
+}
+
 Future<_AudioStream?> _openAudioStream(String videoId) async {
   final failures = <String>[];
-  // Primary: our own yt-dlp backend. yt-dlp gets updated almost daily to
-  // counter YouTube's anti-bot changes — far more reliable than any in-app
-  // extraction library. Server proxies the audio bytes through itself.
+
+  // ── 1. Self-hosted yt-dlp backend ──────────────────────────────────────────
   if (kYtApiBase.isNotEmpty) {
     final client = http.Client();
     try {
       final url = Uri.parse('$kYtApiBase/audio?id=$videoId&key=$kYtApiKey');
       final resp = await client
           .send(http.Request('GET', url))
-          .timeout(const Duration(seconds: 12));
+          .timeout(const Duration(seconds: 30)); // longer — DietPi can be slow
       if (resp.statusCode == 200) return _AudioStream(resp, client);
       failures.add('ytapi:${resp.statusCode}');
       client.close();
@@ -766,53 +805,74 @@ Future<_AudioStream?> _openAudioStream(String videoId) async {
       failures.add('ytapi:${e.runtimeType}');
     }
   }
-  // Fallback: Invidious instances — 5s connection timeout so we don't hang on a dead host
+
+  // ── 2. Invidious instances ──────────────────────────────────────────────────
   for (final host in _invHosts) {
+    final stream = await _tryGet('$host/latest_version?id=$videoId&itag=140');
+    if (stream != null) return stream;
+    failures.add('$host:fail');
+  }
+
+  // ── 3. Piped API ────────────────────────────────────────────────────────────
+  for (final host in _pipedHosts) {
+    if (_deadHosts.contains(host)) continue;
     final client = http.Client();
     try {
-      final url = Uri.parse('$host/latest_version?id=$videoId&itag=140');
-      final resp = await client
-          .send(http.Request('GET', url))
-          .timeout(const Duration(seconds: 5));
-      if (resp.statusCode == 200) return _AudioStream(resp, client);
-      failures.add('$host:${resp.statusCode}');
+      final infoUrl = Uri.parse('$host/streams/$videoId');
+      final infoResp = await client
+          .get(infoUrl)
+          .timeout(const Duration(seconds: 8));
+      if (infoResp.statusCode == 200) {
+        final j = jsonDecode(infoResp.body) as Map<String, dynamic>;
+        final streams = (j['audioStreams'] as List? ?? []);
+        // Prefer m4a (itag 140) for ExoPlayer compatibility
+        final m4a = streams.where((s) =>
+            (s['mimeType'] as String? ?? '').contains('mp4a')).toList();
+        final best = m4a.isNotEmpty ? m4a : streams;
+        if (best.isNotEmpty) {
+          best.sort((a, b) =>
+              (b['bitrate'] as int? ?? 0).compareTo(a['bitrate'] as int? ?? 0));
+          final audioUrl = best.first['url'] as String?;
+          if (audioUrl != null) {
+            final stream = await _tryGet(audioUrl, timeoutSec: 8);
+            if (stream != null) { client.close(); return stream; }
+          }
+        }
+      }
       client.close();
+      if (infoResp.statusCode >= 500) _deadHosts.add(host);
+      failures.add('$host:${infoResp.statusCode}');
     } catch (e) {
       client.close();
+      _deadHosts.add(host);
       failures.add('$host:${e.runtimeType}');
     }
   }
-  // Fallback: youtube_explode_dart direct URL (pinned to 2.5.3 — pure-Dart
-  // decipher, no Deno dependency, since Android has no Deno runtime)
+
+  // ── 4. youtube_explode_dart ─────────────────────────────────────────────────
   try {
     final manifest = await _yt.videos.streamsClient
         .getManifest(videoId)
-        .timeout(const Duration(seconds: 15));
-    // m4a only — this path can't signal its container via headers, and
-    // guessing wrong is exactly the bug that broke playback before.
-    final m4aStreams = manifest.audioOnly.where(
-      (s) => s.codec.mimeType.contains('mp4a'),
-    );
-    if (m4aStreams.isEmpty) {
-      failures.add('yt-explode:no-m4a-stream');
+        .timeout(const Duration(seconds: 20));
+    final audioOnly = manifest.audioOnly.toList();
+    // Prefer m4a (ExoPlayer handles it without remux), fall back to opus/webm
+    final m4a = audioOnly.where((s) => s.codec.mimeType.contains('mp4a')).toList();
+    final opus = audioOnly.where((s) => s.codec.mimeType.contains('opus')).toList();
+    final candidates = m4a.isNotEmpty ? m4a : opus;
+    if (candidates.isEmpty) {
+      failures.add('yt-explode:no-audio-stream');
     } else {
-      final best = m4aStreams.withHighestBitrate();
-      final client = http.Client();
-      try {
-        final resp = await client
-            .send(http.Request('GET', best.url))
-            .timeout(const Duration(seconds: 10));
-        if (resp.statusCode == 200) return _AudioStream(resp, client);
-        failures.add('yt-explode:${resp.statusCode}');
-        client.close();
-      } catch (_) {
-        client.close();
-        rethrow;
+      candidates.sort((a, b) => b.bitrate.bitsPerSecond.compareTo(a.bitrate.bitsPerSecond));
+      for (final s in candidates.take(3)) {
+        final stream = await _tryGet(s.url.toString(), timeoutSec: 12);
+        if (stream != null) return stream;
+        failures.add('yt-explode:${s.codec.mimeType}:fail');
       }
     }
   } catch (e) {
-    failures.add('yt-explode:${e.runtimeType}:$e');
+    failures.add('yt-explode:${e.runtimeType}');
   }
+
   _lastStreamError = failures.join(', ');
   return null;
 }
@@ -1231,7 +1291,20 @@ class Store extends ChangeNotifier {
         }
         final resp = audio.response;
         final client = audio.client;
-        final ext = '.${resp.headers['x-audio-ext'] ?? 'm4a'}';
+        // Determine container from backend hint, then content-type, then default m4a
+        String ext;
+        if (resp.headers['x-audio-ext'] != null) {
+          ext = '.${resp.headers['x-audio-ext']}';
+        } else {
+          final ct = resp.headers['content-type'] ?? '';
+          if (ct.contains('webm') || ct.contains('opus')) {
+            ext = '.webm';
+          } else if (ct.contains('ogg')) {
+            ext = '.ogg';
+          } else {
+            ext = '.m4a';
+          }
+        }
         path = p.join(dir.path, '$id$ext');
         final total = resp.contentLength ?? 0;
         var got = 0;
