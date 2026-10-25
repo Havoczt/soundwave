@@ -858,7 +858,6 @@ Future<void> main() async {
     androidNotificationChannelName: 'SoundWave playback',
     androidNotificationOngoing: true,
     androidStopForegroundOnPause: true,
-    androidNotificationIcon: 'drawable/ic_notification',
     artDownscaleWidth: 300,
     artDownscaleHeight: 300,
   );
