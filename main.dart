@@ -1792,28 +1792,32 @@ class Store extends ChangeNotifier {
     recentIds.insert(0, playedId);
     if (recentIds.length > 10) recentIds = recentIds.sublist(0, 10);
     notifyListeners();
-    await player.setAudioSource(
-      ConcatenatingAudioSource(
-        children: [
-          for (final s in list)
-            AudioSource.file(
-              s.path,
-              tag: MediaItem(
-                id: s.id,
-                title: s.title,
-                artist: s.artist,
-                artUri: s.art != null ? Uri.file(s.art!) : null,
-                duration: s.dur > 0 ? Duration(milliseconds: s.dur) : null,
+    try {
+      await player.setAudioSource(
+        ConcatenatingAudioSource(
+          children: [
+            for (final s in list)
+              AudioSource.file(
+                s.path,
+                tag: MediaItem(
+                  id: s.id,
+                  title: s.title,
+                  artist: s.artist,
+                  artUri: s.art != null ? Uri.file(s.art!) : null,
+                  duration: s.dur > 0 ? Duration(milliseconds: s.dur) : null,
+                ),
               ),
-            ),
-        ],
-      ),
-      initialIndex: i,
-    );
-    player.setLoopMode(loop);
-    player.setShuffleModeEnabled(shuffle);
-    player.setSpeed(speed);
-    player.play();
+          ],
+        ),
+        initialIndex: i,
+      );
+      player.setLoopMode(loop);
+      player.setShuffleModeEnabled(shuffle);
+      player.setSpeed(speed);
+      player.play();
+    } catch (_) {
+      // Playback setup failed (bad file, ExoPlayer error) — don't crash the app
+    }
     // Persist duration once known (YouTube downloads have no embedded duration tag)
     player.durationStream
         .firstWhere((d) => d != null && d.inMilliseconds > 0)
@@ -1831,6 +1835,7 @@ class Store extends ChangeNotifier {
   // Rebuild the player's audio source in-place so the notification picks up
   // updated art/title after enrichment, without audible interruption.
   Future<void> _refreshCurrentMediaItem() async {
+    try {
     final idx = player.currentIndex;
     if (idx == null || idx >= queue.length) return;
     final pos = player.position;
@@ -1855,6 +1860,7 @@ class Store extends ChangeNotifier {
       initialPosition: pos,
     );
     if (wasPlaying) player.play();
+    } catch (_) {} // don't crash if player state changed mid-enrich
   }
 
   void toggleShuffle() {
