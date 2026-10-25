@@ -862,6 +862,15 @@ Future<void> main() async {
     artDownscaleWidth: 300,
     artDownscaleHeight: 300,
   );
+  // Handle playback errors gracefully — skip to next track instead of crashing.
+  player.playbackEventStream.listen((_) {}, onError: (Object e, StackTrace _) {
+    if (player.hasNext) {
+      player.seekToNext();
+    } else {
+      player.stop();
+    }
+  });
+
   await store.load();
   runApp(const SoundWaveApp());
 }
