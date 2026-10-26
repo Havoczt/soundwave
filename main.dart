@@ -796,7 +796,7 @@ Future<_AudioStream?> _openAudioStream(String videoId) async {
       final url = Uri.parse('$kYtApiBase/audio?id=$videoId&key=$kYtApiKey');
       final resp = await client
           .send(http.Request('GET', url))
-          .timeout(const Duration(seconds: 30)); // longer — DietPi can be slow
+          .timeout(const Duration(seconds: 60)); // longer — DietPi can be slow
       if (resp.statusCode == 200) return _AudioStream(resp, client);
       failures.add('ytapi:${resp.statusCode}');
       client.close();
