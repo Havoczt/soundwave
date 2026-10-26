@@ -711,6 +711,19 @@ class BatchDownloadTask {
 Future<List<InvResult>> invSearch(String q) async {
   final results = await _yt.search.search(q);
   return results
+      .where((v) {
+        final secs = v.duration?.inSeconds ?? 0;
+        // Filter out non-music: tutorials, full courses, podcasts (>12 min),
+        // and very short clips (<30s). Also skip obvious non-music keywords.
+        if (secs > 0 && (secs < 30 || secs > 720)) return false;
+        final low = v.title.toLowerCase();
+        const skip = [
+          'tutorial', 'how to', 'course', 'learn', 'lesson',
+          'lecture', 'guide', 'full course', 'explained', 'review',
+        ];
+        if (skip.any((k) => low.contains(k))) return false;
+        return true;
+      })
       .map(
         (v) => InvResult(
           videoId: v.id.value,
