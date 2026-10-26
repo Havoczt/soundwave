@@ -3272,9 +3272,9 @@ class _SearchSheetState extends State<_SearchSheet> {
                               ),
                               const SizedBox(height: 2),
                               Text(
-                                kYtApiBase.isNotEmpty
-                                    ? 'Normalizing'
-                                    : 'Downloading',
+                                prog != null && prog > 0
+                                    ? '${(prog * 100).toInt()}%'
+                                    : 'Loading…',
                                 style: const TextStyle(
                                   fontSize: 8,
                                   color: Colors.white54,
