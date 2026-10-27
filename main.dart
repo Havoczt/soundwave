@@ -715,11 +715,15 @@ Future<List<InvResult>> invSearch(String q) async {
         final secs = v.duration?.inSeconds ?? 0;
         // Filter out non-music: tutorials, full courses, podcasts (>12 min),
         // and very short clips (<30s). Also skip obvious non-music keywords.
-        if (secs > 0 && (secs < 30 || secs > 720)) return false;
+        if (secs > 0 && (secs < 30 || secs > 600)) return false;
         final low = v.title.toLowerCase();
         const skip = [
           'tutorial', 'how to', 'course', 'learn', 'lesson',
           'lecture', 'guide', 'full course', 'explained', 'review',
+          'podcast', 'interview', 'episode', 'react', 'reacts',
+          'reaction', 'commentary', 'gameplay', 'highlights', 'trailer',
+          'teaser', 'behind the scenes', 'documentary', 'what is',
+          'beginners', 'masterclass', 'bootcamp', 'vlog',
         ];
         if (skip.any((k) => low.contains(k))) return false;
         return true;
