@@ -181,44 +181,6 @@ void _lyricLog(String s) {
   if (lyricLog.length > 200) lyricLog.removeAt(0);
 }
 
-Future<Map<String, String?>?> _lookupMusicBrainz(
-  String title,
-  String artist,
-) async {
-  try {
-    final q = Uri.encodeComponent(
-      artist == 'Unknown artist' ? title : '$title $artist',
-    );
-    final r = await http
-        .get(
-          Uri.parse(
-            'https://musicbrainz.org/ws/2/recording/?query=$q&limit=1&fmt=json',
-          ),
-          headers: {'User-Agent': 'SoundWave/1.0 (soundwave-app)'},
-        )
-        .timeout(const Duration(seconds: 10));
-    if (r.statusCode != 200) return null;
-    final j = jsonDecode(r.body) as Map;
-    final recs = j['recordings'] as List?;
-    if (recs == null || recs.isEmpty) return null;
-    final rec = recs.first as Map;
-    final foundTitle = rec['title'] as String?;
-    String? foundArtist;
-    final credits = rec['artist-credit'] as List?;
-    if (credits != null && credits.isNotEmpty) {
-      foundArtist = (credits.first as Map)['artist']?['name'] as String?;
-    }
-    String? releaseId;
-    final releases = rec['releases'] as List?;
-    if (releases != null && releases.isNotEmpty) {
-      releaseId = (releases.first as Map)['id'] as String?;
-    }
-    return {'title': foundTitle, 'artist': foundArtist, 'releaseId': releaseId};
-  } catch (_) {
-    return null;
-  }
-}
-
 const _artAgent = 'SoundWave/1.0 (github.com/Havoczt/soundwave)';
 const _maxArtBytes = 12 * 1024 * 1024;
 
@@ -912,9 +874,15 @@ class SoundWaveApp extends StatelessWidget {
       brightness: Brightness.dark,
       colorScheme: const ColorScheme.dark(primary: green),
       scaffoldBackgroundColor: const Color(0xFF121212),
-      navigationBarTheme: const NavigationBarThemeData(
-        backgroundColor: Color(0xFF000000),
-        indicatorColor: Color(0xFF2A2A2A),
+      navigationBarTheme: NavigationBarThemeData(
+        backgroundColor: const Color(0xFF000000),
+        indicatorColor: const Color(0xFF2A2A2A),
+        labelTextStyle: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.selected)) {
+            return const TextStyle(color: green, fontWeight: FontWeight.bold, fontSize: 12);
+          }
+          return const TextStyle(color: Colors.white70, fontSize: 12);
+        }),
       ),
     ),
     home: const Home(),
@@ -1090,7 +1058,6 @@ class Store extends ChangeNotifier {
       if (r.statusCode != 200) return;
       final j = jsonDecode(r.body) as Map;
       final tag = '${j['tag_name']}';
-      final build = int.tryParse(tag.split('.').last) ?? 0;
       String? url;
       for (final a in (j['assets'] as List)) {
         if ('${a['name']}'.endsWith('.apk'))
@@ -1871,86 +1838,6 @@ class Store extends ChangeNotifier {
   }
 }
 
-Future<void> editSongInfo(BuildContext c, Song s) async {
-  final titleCtl = TextEditingController(text: s.title);
-  final artistCtl = TextEditingController(
-    text: s.artist == 'Unknown artist' ? '' : s.artist,
-  );
-  final confirmed = await showDialog<bool>(
-    context: c,
-    builder: (d) => AlertDialog(
-      title: const Text('Edit song info'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: titleCtl,
-            autofocus: true,
-            decoration: const InputDecoration(labelText: 'Title'),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: artistCtl,
-            decoration: const InputDecoration(labelText: 'Artist'),
-          ),
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(d, false),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(d, true),
-          child: const Text('Save & refresh'),
-        ),
-      ],
-    ),
-  );
-  if (confirmed != true) return;
-  final newTitle = titleCtl.text.trim();
-  final newArtist = artistCtl.text.trim();
-  await store.editSongInfo(
-    s,
-    newTitle,
-    newArtist.isEmpty ? 'Unknown artist' : newArtist,
-  );
-  if (c.mounted) snack(c, 'Saved — fetching lyrics…');
-}
-
-class _AnimatedTap extends StatefulWidget {
-  final VoidCallback onTap;
-  final Widget child;
-  const _AnimatedTap({required this.onTap, required this.child});
-  @override
-  State<_AnimatedTap> createState() => _AnimatedTapState();
-}
-
-class _AnimatedTapState extends State<_AnimatedTap> with SingleTickerProviderStateMixin {
-  late final AnimationController _ctrl;
-  late final Animation<double> _scale;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 100));
-    _scale = Tween<double>(begin: 1.0, end: 0.95).animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut));
-  }
-
-  @override
-  void dispose() { _ctrl.dispose(); super.dispose(); }
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTapDown: (_) => _ctrl.forward(),
-      onTapUp: (_) { _ctrl.reverse(); widget.onTap(); },
-      onTapCancel: () => _ctrl.reverse(),
-      child: ScaleTransition(scale: _scale, child: widget.child),
-    );
-  }
-}
-
 Color _col(String s) {
   var h = 0;
   for (final r in s.runes) {
@@ -2521,7 +2408,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
           style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
         ),
         const SizedBox(height: 12),
-        _AnimatedTap(
+        GestureDetector(
           onTap: _openSearch,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -2543,7 +2430,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
         ),
         const SizedBox(height: 16),
         _batchProgress(),
-        if (songs.isNotEmpty)
+        if (songs.isNotEmpty) ...[
           GridView.count(
             crossAxisCount: 2,
             shrinkWrap: true,
@@ -2592,7 +2479,8 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                 ),
             ],
           ),
-        const SizedBox(height: 20),
+          const SizedBox(height: 20),
+        ],
         Row(
           children: [
             Expanded(
@@ -3371,15 +3259,7 @@ class MiniPlayer extends StatelessWidget {
             return const SizedBox.shrink();
           final s = store.queue[i];
           final lk = store.liked.contains(s.id);
-          return TweenAnimationBuilder<double>(
-            tween: Tween(begin: 0.0, end: 1.0),
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOutCubic,
-            builder: (context, value, child) => FractionalTranslation(
-              translation: Offset(0, 1 - value),
-              child: Opacity(opacity: value, child: child),
-            ),
-            child: Container(
+          return Container(
             color: const Color(0xFF1E1E1E),
             padding: const EdgeInsets.fromLTRB(12, 8, 4, 0),
             child: Column(
@@ -3474,7 +3354,6 @@ class MiniPlayer extends StatelessWidget {
                 const SeekBar(),
               ],
             ),
-          ),
           );
         },
       ),
@@ -3604,14 +3483,7 @@ class _NowPlayingState extends State<NowPlaying> with TickerProviderStateMixin {
                                         ),
                                       ],
                                     ),
-                                    child: AnimatedSwitcher(
-                                      duration: const Duration(milliseconds: 400),
-                                      transitionBuilder: (child, anim) => FadeTransition(
-                                        opacity: anim,
-                                        child: ScaleTransition(scale: Tween(begin: 0.92, end: 1.0).animate(anim), child: child),
-                                      ),
-                                      child: Art(s, dimension, radius: 16, useHero: true, key: ValueKey(s.id)),
-                                    ),
+                                    child: Art(s, dimension, radius: 16, useHero: true),
                                   ),
                                 );
                               },
@@ -3624,56 +3496,38 @@ class _NowPlayingState extends State<NowPlaying> with TickerProviderStateMixin {
                     Row(
                       children: [
                         Expanded(
-                          child: AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 300),
-                            transitionBuilder: (child, anim) => FadeTransition(
-                              opacity: anim,
-                              child: SlideTransition(
-                                position: Tween(begin: const Offset(0, 0.15), end: Offset.zero).animate(
-                                  CurvedAnimation(parent: anim, curve: Curves.easeOut),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                s.title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.w800,
                                 ),
-                                child: child,
                               ),
-                            ),
-                            child: Column(
-                              key: ValueKey(s.id),
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  s.title,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    fontSize: 24,
-                                    fontWeight: FontWeight.w800,
-                                  ),
+                              const SizedBox(height: 4),
+                              Text(
+                                s.artist,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  color: Colors.white70,
                                 ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  s.artist,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    fontSize: 16,
-                                    color: Colors.white70,
-                                  ),
-                                ),
-                              ],
-                            ),
+                              ),
+                            ],
                           ),
                         ),
-                        AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 250),
-                          transitionBuilder: (child, anim) => ScaleTransition(scale: anim, child: FadeTransition(opacity: anim, child: child)),
-                          child: IconButton(
-                            key: ValueKey(lk),
-                            iconSize: 32,
-                            icon: Icon(
-                              lk ? Icons.favorite : Icons.favorite_border,
-                              color: lk ? green : Colors.white,
-                            ),
-                            onPressed: () => store.like(s.id),
+                        IconButton(
+                          iconSize: 32,
+                          icon: Icon(
+                            lk ? Icons.favorite : Icons.favorite_border,
+                            color: lk ? green : Colors.white,
                           ),
+                          onPressed: () => store.like(s.id),
                         ),
                       ],
                     ),
@@ -3709,15 +3563,10 @@ class _NowPlayingState extends State<NowPlaying> with TickerProviderStateMixin {
                                   width: 64,
                                   height: 64,
                                   alignment: Alignment.center,
-                                  child: AnimatedSwitcher(
-                                    duration: const Duration(milliseconds: 200),
-                                    transitionBuilder: (child, anim) => ScaleTransition(scale: anim, child: child),
-                                    child: Icon(
-                                      key: ValueKey(playing),
-                                      playing ? Icons.pause : Icons.play_arrow,
-                                      size: 36,
-                                      color: Colors.black,
-                                    ),
+                                  child: Icon(
+                                    playing ? Icons.pause : Icons.play_arrow,
+                                    size: 36,
+                                    color: Colors.black,
                                   ),
                                 ),
                               ),
