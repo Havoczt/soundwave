@@ -1871,6 +1871,53 @@ class Store extends ChangeNotifier {
   }
 }
 
+Future<void> editSongInfo(BuildContext c, Song s) async {
+  final titleCtl = TextEditingController(text: s.title);
+  final artistCtl = TextEditingController(
+    text: s.artist == 'Unknown artist' ? '' : s.artist,
+  );
+  final confirmed = await showDialog<bool>(
+    context: c,
+    builder: (d) => AlertDialog(
+      title: const Text('Edit song info'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: titleCtl,
+            autofocus: true,
+            decoration: const InputDecoration(labelText: 'Title'),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: artistCtl,
+            decoration: const InputDecoration(labelText: 'Artist'),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(d, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(d, true),
+          child: const Text('Save & refresh'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true) return;
+  final newTitle = titleCtl.text.trim();
+  final newArtist = artistCtl.text.trim();
+  await store.editSongInfo(
+    s,
+    newTitle,
+    newArtist.isEmpty ? 'Unknown artist' : newArtist,
+  );
+  if (c.mounted) snack(c, 'Saved — fetching lyrics…');
+}
+
 class _AnimatedTap extends StatefulWidget {
   final VoidCallback onTap;
   final Widget child;
