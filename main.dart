@@ -33,17 +33,11 @@ const _exts = {
 const kRepo = String.fromEnvironment('REPO');
 const kBuild = int.fromEnvironment('BUILD', defaultValue: 0);
 const kTag = String.fromEnvironment('TAG', defaultValue: '');
-// Self-hosted yt-dlp backend (see ytdlp_api.py) — primary download path.
-// yt-dlp is updated almost daily to counter YouTube's changes; nothing that
-// runs purely on-device can keep up with that, so this is the reliable path.
 const kYtApiBase = String.fromEnvironment('YT_API_BASE', defaultValue: '');
 const kYtApiKey = String.fromEnvironment('YT_API_KEY', defaultValue: '');
 final player = AudioPlayer();
-// Palette cache: song.id → dominant color extracted from album art
 final _paletteCache = <String, Color>{};
 
-/// Disk-backed cache for data that should not make the library index large.
-/// Writes are atomic so a process kill cannot leave a half-written cache file.
 class LocalCache {
   Directory? _root;
   Future<void>? _initFuture;
@@ -111,7 +105,6 @@ class LocalCache {
         return null;
       return {'plain': plain, 'synced': synced};
     } catch (_) {
-      // A broken cache entry is disposable; the song itself is still usable.
       try {
         await file.delete();
       } catch (_) {}
@@ -152,8 +145,6 @@ class LocalCache {
     );
     try {
       await tmp.writeAsBytes(bytes, flush: true);
-      // Windows cannot replace an existing file with rename. Removing the old
-      // cache entry first still leaves a complete temporary file on failure.
       if (Platform.isWindows && await file.exists()) await file.delete();
       await tmp.rename(file.path);
     } finally {
@@ -182,7 +173,6 @@ class LocalCache {
   }
 }
 
-// ---- in-app debug log (visible when lyrics fail)
 final List<String> lyricLog = [];
 void _lyricLog(String s) {
   debugPrint(s);
@@ -191,7 +181,6 @@ void _lyricLog(String s) {
   if (lyricLog.length > 200) lyricLog.removeAt(0);
 }
 
-// ---- metadata enrichment helpers
 Future<Map<String, String?>?> _lookupMusicBrainz(
   String title,
   String artist,
@@ -312,8 +301,6 @@ Future<List<_ArtCandidate>> _fetchItunesArts(
   }
 }
 
-// Deezer has a public search endpoint and usually has better coverage than
-// iTunes for regional releases and older albums.
 Future<List<_ArtCandidate>> _fetchDeezerArts(
   String title,
   String artist,
@@ -395,8 +382,6 @@ Future<List<_ArtCandidate>> _fetchLastFmArts(
   }
 }
 
-// MusicBrainz release → Cover Art Archive. The archive is a useful final
-// fallback because it is community-curated and does not require an API key.
 Future<List<_ArtCandidate>> _fetchCoverArtArchive(
   String title,
   String artist,
@@ -484,8 +469,6 @@ Future<Uint8List?> _downloadArt(String url) async {
   }
 }
 
-// Query several independent catalogs, rank matches, and validate every image
-// before caching it. A bad response from one provider cannot block the others.
 Future<Uint8List?> _fetchArtBytes(String title, String artist) async {
   final results = await Future.wait<List<_ArtCandidate>>([
     _fetchItunesArts(title, artist),
@@ -504,13 +487,11 @@ Future<Uint8List?> _fetchArtBytes(String title, String artist) async {
   return null;
 }
 
-// Fuzzy string similarity: ratio of common chars to max length (0..1)
 double _similarity(String a, String b) {
   final s1 = a.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
   final s2 = b.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
   if (s1.isEmpty && s2.isEmpty) return 1;
   if (s1.isEmpty || s2.isEmpty) return 0;
-  // Count matching chars via frequency maps
   final freq = <String, int>{};
   for (final c in s1.split('')) freq[c] = (freq[c] ?? 0) + 1;
   var common = 0;
@@ -523,8 +504,6 @@ double _similarity(String a, String b) {
   return common / (s1.length > s2.length ? s1.length : s2.length);
 }
 
-// Feature 2b: returns both plain and synced lyrics; fuzzy-scores results when artist unknown
-// Fallback plain-lyrics source when LRCLIB has nothing.
 Future<String?> _fetchLyricsOvh(String title, String artist) async {
   if (artist == 'Unknown artist') return null;
   try {
@@ -680,8 +659,6 @@ Future<Map<String, String?>> _fetchLrcLibLyrics(
   };
 }
 
-// ---- Piped search + download (replaces Invidious)
-// ---- YouTube search + stream via youtube_explode_dart (no third-party instances)
 final _yt = YoutubeExplode();
 
 class InvResult {
@@ -713,8 +690,6 @@ Future<List<InvResult>> invSearch(String q) async {
   return results
       .where((v) {
         final secs = v.duration?.inSeconds ?? 0;
-        // Filter out non-music: tutorials, full courses, podcasts (>12 min),
-        // and very short clips (<30s). Also skip obvious non-music keywords.
         if (secs > 0 && (secs < 30 || secs > 600)) return false;
         final low = v.title.toLowerCase();
         const skip = [
@@ -740,18 +715,6 @@ Future<List<InvResult>> invSearch(String q) async {
       .toList();
 }
 
-// ── Audio stream pipeline ────────────────────────────────────────────────────
-// Priority order:
-//   1. Self-hosted yt-dlp backend  (most reliable — updated daily vs YT)
-//   2. Invidious public instances  (fast when alive — server-side extraction)
-//   3. Piped API instances         (separate infra from Invidious)
-//   4. youtube_explode_dart        (pure-Dart fallback — m4a then opus/webm)
-//
-// Dead-host blacklist: any host that fails is skipped for the rest of the
-// app session, so subsequent downloads don't burn time on known-dead servers.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Invidious: official list from api.invidious.io (https-only, api=true)
 const _invHosts = [
   'https://inv.nadeko.net',
   'https://invidious.nerdvpn.de',
@@ -763,16 +726,13 @@ const _invHosts = [
   'https://invidious.io.lol',
 ];
 
-// Piped: alternative YT frontend with independent infra — different failure modes
 const _pipedHosts = [
   'https://pipedapi.kavin.rocks',
   'https://pipedapi.adminforge.de',
   'https://pipedapi.drgns.space',
 ];
 
-// Session-scoped dead host blacklist — reset on app restart
 final _deadHosts = <String>{};
-
 String _lastStreamError = '';
 
 class _AudioStream {
@@ -781,7 +741,6 @@ class _AudioStream {
   const _AudioStream(this.response, this.client);
 }
 
-// Try a single HTTP GET, return stream or null. Marks host dead on failure.
 Future<_AudioStream?> _tryGet(String urlStr, {int timeoutSec = 6}) async {
   final uri = Uri.parse(urlStr);
   final host = '${uri.scheme}://${uri.host}';
@@ -793,12 +752,11 @@ Future<_AudioStream?> _tryGet(String urlStr, {int timeoutSec = 6}) async {
         .timeout(Duration(seconds: timeoutSec));
     if (resp.statusCode == 200) return _AudioStream(resp, client);
     client.close();
-    // 4xx = instance is alive but rejected us — don't blacklist
     if (resp.statusCode >= 500) _deadHosts.add(host);
     return null;
   } catch (_) {
     client.close();
-    _deadHosts.add(host); // timeout / connection refused — host is dead
+    _deadHosts.add(host);
     return null;
   }
 }
@@ -806,14 +764,13 @@ Future<_AudioStream?> _tryGet(String urlStr, {int timeoutSec = 6}) async {
 Future<_AudioStream?> _openAudioStream(String videoId) async {
   final failures = <String>[];
 
-  // ── 1. Self-hosted yt-dlp backend ──────────────────────────────────────────
   if (kYtApiBase.isNotEmpty) {
     final client = http.Client();
     try {
       final url = Uri.parse('$kYtApiBase/audio?id=$videoId&key=$kYtApiKey');
       final resp = await client
           .send(http.Request('GET', url))
-          .timeout(const Duration(seconds: 60)); // longer — DietPi can be slow
+          .timeout(const Duration(seconds: 60));
       if (resp.statusCode == 200) return _AudioStream(resp, client);
       failures.add('ytapi:${resp.statusCode}');
       client.close();
@@ -823,14 +780,12 @@ Future<_AudioStream?> _openAudioStream(String videoId) async {
     }
   }
 
-  // ── 2. Invidious instances ──────────────────────────────────────────────────
   for (final host in _invHosts) {
     final stream = await _tryGet('$host/latest_version?id=$videoId&itag=140');
     if (stream != null) return stream;
     failures.add('$host:fail');
   }
 
-  // ── 3. Piped API ────────────────────────────────────────────────────────────
   for (final host in _pipedHosts) {
     if (_deadHosts.contains(host)) continue;
     final client = http.Client();
@@ -842,7 +797,6 @@ Future<_AudioStream?> _openAudioStream(String videoId) async {
       if (infoResp.statusCode == 200) {
         final j = jsonDecode(infoResp.body) as Map<String, dynamic>;
         final streams = (j['audioStreams'] as List? ?? []);
-        // Prefer m4a (itag 140) for ExoPlayer compatibility
         final m4a = streams.where((s) =>
             (s['mimeType'] as String? ?? '').contains('mp4a')).toList();
         final best = m4a.isNotEmpty ? m4a : streams;
@@ -866,13 +820,11 @@ Future<_AudioStream?> _openAudioStream(String videoId) async {
     }
   }
 
-  // ── 4. youtube_explode_dart ─────────────────────────────────────────────────
   try {
     final manifest = await _yt.videos.streamsClient
         .getManifest(videoId)
         .timeout(const Duration(seconds: 20));
     final audioOnly = manifest.audioOnly.toList();
-    // Prefer m4a (ExoPlayer handles it without remux), fall back to opus/webm
     final m4a = audioOnly.where((s) => s.codec.mimeType.contains('mp4a')).toList();
     final opus = audioOnly.where((s) => s.codec.mimeType.contains('opus')).toList();
     final candidates = m4a.isNotEmpty ? m4a : opus;
@@ -894,7 +846,6 @@ Future<_AudioStream?> _openAudioStream(String videoId) async {
   return null;
 }
 
-// Feature 2c: LRC parser
 List<({int ms, String line})> parseLrc(String lrc) {
   final timeRe = RegExp(r'\[(\d+):(\d+)(?:[.:](\d+))?\]');
   final result = <({int ms, String line})>[];
@@ -938,7 +889,6 @@ Future<void> main() async {
     artDownscaleWidth: 300,
     artDownscaleHeight: 300,
   );
-  // Handle playback errors gracefully — skip to next track instead of crashing.
   player.playbackEventStream.listen((_) {}, onError: (Object e, StackTrace _) {
     if (player.hasNext) {
       player.seekToNext();
@@ -971,15 +921,14 @@ class SoundWaveApp extends StatelessWidget {
   );
 }
 
-// ---------------------------------------------------------------- models
 class Song {
   final String id, path;
   String title, artist;
-  String? art, lyrics, syncedLyrics; // Feature 2a: added syncedLyrics
+  String? art, lyrics, syncedLyrics;
   int dur;
   bool own;
-  bool tagsBad; // true = artist is still unknown after all enrichment attempts
-  String? videoId; // YouTube video ID if downloaded from YouTube
+  bool tagsBad;
+  String? videoId;
   Song(
     this.id,
     this.title,
@@ -1031,13 +980,12 @@ class Playlist {
       Playlist(j['id'], j['name'], List<String>.from(j['ids']));
 }
 
-// ---------------------------------------------------------------- store
 class Store extends ChangeNotifier {
   List<Song> songs = [], queue = [];
   Set<String> liked = {};
   List<Playlist> lists = [];
   List<String> folders = [];
-  List<String> recentIds = []; // Feature 1: recently played
+  List<String> recentIds = [];
   bool shuffle = false, ready = false;
   LoopMode loop = LoopMode.off;
   double speed = 1.0;
@@ -1079,8 +1027,6 @@ class Store extends ChangeNotifier {
           .map((e) => Song.fromJson(e as Map))
           .where((s) => File(s.path).existsSync())
           .toList();
-      // Art and lyric files are validated lazily when a song is displayed or
-      // enriched; startup should not perform one disk read per library item.
     }
     final pl = prefs.getString('lists');
     if (pl != null)
@@ -1089,7 +1035,7 @@ class Store extends ChangeNotifier {
           .toList();
     liked = (prefs.getStringList('liked') ?? []).toSet();
     folders = prefs.getStringList('folders') ?? [];
-    recentIds = prefs.getStringList('recents') ?? []; // Feature 1
+    recentIds = prefs.getStringList('recents') ?? [];
     ready = true;
     notifyListeners();
     Permission.notification.request();
@@ -1097,8 +1043,6 @@ class Store extends ChangeNotifier {
   }
 
   void save() {
-    // Coalesce bursts from playback/enrichment so JSON encoding and disk I/O do
-    // not run once per position or metadata update.
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(milliseconds: 250), () {
       final songJson = jsonEncode(songs.map((s) => s.toJson()).toList());
@@ -1134,7 +1078,6 @@ class Store extends ChangeNotifier {
     touch();
   }
 
-  // ---- in-app updates (from your GitHub releases)
   Future<void> checkUpdate() async {
     if (kRepo.isEmpty) return;
     try {
@@ -1202,7 +1145,6 @@ class Store extends ChangeNotifier {
     }
   }
 
-  // ---- tags + album art
   Future<String?> _saveArt(String id, List<int> bytes) async {
     final imageBytes = Uint8List.fromList(bytes);
     if (!await _isUsableArt(imageBytes)) return null;
@@ -1224,10 +1166,7 @@ class Store extends ChangeNotifier {
   }
 
   Future<void> _enrich(Song s) async {
-    // MusicBrainz removed — too many false positives overwriting correct data.
-    // Mark song as needing manual tag fix if artist still unknown
     s.tagsBad = s.artist == 'Unknown artist';
-    // Clear previously fetched art for unknown-artist songs — it's likely wrong.
     if (s.tagsBad && s.art != null) {
       try { await File(s.art!).delete(); } catch (_) {}
       s.art = null;
@@ -1237,7 +1176,6 @@ class Store extends ChangeNotifier {
       final bytes = await _fetchArtBytes(s.title, s.artist);
       if (bytes != null) s.art = await _saveArt(s.id, bytes);
     }
-    // Feature 2b: fetch both plain and synced lyrics
     final cached = await cache.readLyrics(s.id);
     if (cached != null) {
       s.lyrics = cached['plain'];
@@ -1267,7 +1205,6 @@ class Store extends ChangeNotifier {
       busy = 'Fetching lyrics & artist ${i + 1} of ${songs.length}…';
       notifyListeners();
       await Future.delayed(Duration.zero);
-      // Clear both in-memory and disk lyrics so they get re-fetched.
       songs[i].lyrics = null;
       songs[i].syncedLyrics = null;
       await cache.removeLyrics(songs[i].id);
@@ -1278,13 +1215,10 @@ class Store extends ChangeNotifier {
     return 'Lyrics & artist info refreshed';
   }
 
-  // ---- download from Invidious
-  // Returns error string or '' on success
   Future<String> downloadFromInvidious(
     InvResult result,
     void Function(double) onProgress,
   ) async {
-    // Deduplicate by videoId
     if (songs.any((s) => s.videoId == result.videoId)) {
       return 'Already in your library';
     }
@@ -1296,8 +1230,6 @@ class Store extends ChangeNotifier {
     final tempPath = p.join(dir.path, '.$id.part');
     String? path;
     try {
-      // Re-open the stream after a transient network failure. A partial file
-      // is never added to the library and is removed before the next attempt.
       for (var attempt = 1; attempt <= 3; attempt++) {
         final audio = await _openAudioStream(result.videoId);
         if (audio == null) {
@@ -1308,7 +1240,6 @@ class Store extends ChangeNotifier {
         }
         final resp = audio.response;
         final client = audio.client;
-        // Determine container from backend hint, then content-type, then default m4a
         String ext;
         if (resp.headers['x-audio-ext'] != null) {
           ext = '.${resp.headers['x-audio-ext']}';
@@ -1339,7 +1270,6 @@ class Store extends ChangeNotifier {
           await sink.flush();
           await sink.close();
           sink = null;
-          // Rename only after the complete stream has been flushed.
           await File(tempPath).rename(path);
           client.close();
           break;
@@ -1366,16 +1296,11 @@ class Store extends ChangeNotifier {
         }
         return 'Download did not complete';
       }
-      // Parse title/artist from result
       var title = result.title;
       var artist = result.author;
-      // Clean up "- Topic" from auto-generated channels
       artist = artist
           .replaceAll(RegExp(r'\s*-\s*Topic$', caseSensitive: false), '')
           .trim();
-      // Try "Artist - Title" split — only if left part looks like a short artist name
-      // (≤ 4 words). Avoids misparse of Spanish/multi-word song titles like
-      // "El Castillo De Dracula - Juanjo Papa Vampiro".
       final parts = title.split(' - ');
       if (parts.length > 1) {
         final candidate = parts.first.trim();
@@ -1385,9 +1310,6 @@ class Store extends ChangeNotifier {
           title = parts.sublist(1).join(' - ').trim();
         }
       }
-      // Also use channel name as artist if it looks cleaner than "Artist - Title" parse
-      // and we didn't get a good split (artist still from channel).
-      // Strip download site noise and YouTube video title junk
       title = title
           .replaceAll(
             RegExp(
@@ -1406,12 +1328,8 @@ class Store extends ChangeNotifier {
         own: true,
         videoId: result.videoId,
       );
-      // Make the download playable immediately; enrichment can happen when
-      // the track is first played and must not delay queue insertion.
       await _applyTags(s);
       songs.insert(0, s);
-      // Batch downloads must finish enrichment before the next item starts so
-      // each imported track has artwork and cached lyrics when the queue ends.
       await _enrich(s);
       touch();
       return '';
@@ -1428,7 +1346,6 @@ class Store extends ChangeNotifier {
     }
   }
 
-  // ---- playlist and batch download queue
   bool _isPlaylistInput(String input) =>
       input.contains('youtube.com/playlist') ||
       (input.contains('youtube.com/watch') && input.contains('list=')) ||
@@ -1441,7 +1358,6 @@ class Store extends ChangeNotifier {
 
   Future<List<Map<String, String>>> _fetchSpotifyPlaylist(String url) async {
     try {
-      // Extract playlist ID from various Spotify URL formats
       final idMatch = RegExp(
         r'(?:open\.spotify\.com/playlist/|spotify\.com/playlist/|spotify:playlist:)([a-zA-Z0-9]+)',
       ).firstMatch(url);
@@ -1450,13 +1366,11 @@ class Store extends ChangeNotifier {
       final playlistId = idMatch.group(1)!;
       final pageUrl = 'https://open.spotify.com/playlist/$playlistId';
 
-      // Fetch the public playlist page
       final response = await http
           .get(Uri.parse(pageUrl))
           .timeout(const Duration(seconds: 15));
       if (response.statusCode != 200) return [];
 
-      // Parse JSON-LD structured data embedded in the page
       final jsonLdMatch = RegExp(
         r'<script type="application/ld\+json">(.+?)</script>',
         dotAll: true,
@@ -1480,7 +1394,6 @@ class Store extends ChangeNotifier {
         } catch (_) {}
       }
 
-      // Fallback: extract from embedded Spotify state JSON
       final stateMatch = RegExp(
         r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>',
       ).firstMatch(response.body);
@@ -1517,8 +1430,6 @@ class Store extends ChangeNotifier {
     if (match == null) return value;
     final left = match.group(1)!.trim();
     final right = match.group(2)!.trim();
-    // Accept the common "Artist - Title" format while avoiding a second
-    // split for ordinary titles that contain a dash.
     return left.split(RegExp(r'\s+')).length <= 6 ? '$left $right' : value;
   }
 
@@ -1526,7 +1437,6 @@ class Store extends ChangeNotifier {
     final value = input.trim();
     if (value.isEmpty) return [];
 
-    // YouTube playlist
     if (_isPlaylistInput(value)) {
       final tasks = <BatchDownloadTask>[];
       var index = 0;
@@ -1546,7 +1456,6 @@ class Store extends ChangeNotifier {
       return tasks;
     }
 
-    // Spotify playlist
     if (_isSpotifyPlaylist(value)) {
       final tracks = await _fetchSpotifyPlaylist(value);
       if (tracks.isEmpty) return [];
@@ -1559,7 +1468,6 @@ class Store extends ChangeNotifier {
       ];
     }
 
-    // Newline-separated song list
     final lines = value
         .split(RegExp(r'[\r\n]+'))
         .map((line) => line.trim())
@@ -1675,9 +1583,7 @@ class Store extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ---- reset song back to file tags (clears any bad enrichment data)
   Future<void> resetToFileTags(Song s) async {
-    // Baseline from filename
     s.title = _cleanTitle(
       p.basenameWithoutExtension(s.path).replaceAll('_', ' ').trim(),
     );
@@ -1687,27 +1593,22 @@ class Store extends ChangeNotifier {
       s.artist = parts.first.trim();
       s.title = parts.sublist(1).join(' - ').trim();
     }
-    // Override with actual embedded tags if present
     await _applyTags(s);
-    // Clear lyrics in memory and on disk so they re-fetch with correct metadata.
     s.lyrics = null;
     s.syncedLyrics = null;
     await cache.removeLyrics(s.id);
     s.art = null;
     save();
     notifyListeners();
-    // Re-enrich in background
     _enrich(s).then((_) {
       save();
       notifyListeners();
     });
   }
 
-  // ---- manual edit song info
   Future<void> editSongInfo(Song s, String newTitle, String newArtist) async {
     s.title = newTitle.trim().isEmpty ? s.title : newTitle.trim();
     s.artist = newArtist.trim().isEmpty ? s.artist : newArtist.trim();
-    // Clear art and lyrics so they all re-fetch with the corrected metadata.
     if (s.art != null) {
       try {
         await File(s.art!).delete();
@@ -1719,14 +1620,12 @@ class Store extends ChangeNotifier {
     await cache.removeLyrics(s.id);
     save();
     notifyListeners();
-    // Re-fetch in background
     _enrich(s).then((_) {
       save();
       notifyListeners();
     });
   }
 
-  // ---- importing
   Future<int> _import(List<MapEntry<String, String>> items, bool own) async {
     final dir = Directory(
       p.join((await getApplicationDocumentsDirectory()).path, 'music'),
@@ -1749,7 +1648,6 @@ class Store extends ChangeNotifier {
           .basenameWithoutExtension(items[i].value)
           .replaceAll('_', ' ')
           .trim();
-      // Strip common download-site suffixes and YouTube junk from filenames
       title = title
           .replaceAll(
             RegExp(
@@ -1770,9 +1668,6 @@ class Store extends ChangeNotifier {
         }
       }
       final s = Song(id, title, artist, path, own: own);
-      // Index metadata first and make the item visible immediately. Album art
-      // and lyrics are fetched lazily on playback instead of serially blocking
-      // a folder scan on one network request per song.
       await _applyTags(s);
       songs.insert(0, s);
       n++;
@@ -1850,19 +1745,15 @@ class Store extends ChangeNotifier {
     } catch (_) {}
     songs.removeWhere((x) => x.id == s.id);
     liked.remove(s.id);
-    recentIds.remove(s.id); // Feature 1: clean up recents
+    recentIds.remove(s.id);
     for (final l in lists) {
       l.ids.remove(s.id);
     }
     touch();
   }
 
-  // ---- playback
   Future<void> play(List<Song> list, int i) async {
     queue = list;
-    // Retry enrichment when art is missing as well as when metadata or lyrics
-    // are incomplete. This repairs transient catalog/network failures on the
-    // next play instead of leaving a track permanently art-less.
     final s = list[i];
     final artMissing = s.art == null || !await LocalCache.validFile(s.art);
     if (s.artist == 'Unknown artist' ||
@@ -1871,11 +1762,9 @@ class Store extends ChangeNotifier {
       _enrich(s).then((_) async {
         save();
         notifyListeners();
-        // Refresh notification art after enrich — rebuild queue in place
         await _refreshCurrentMediaItem();
       });
     }
-    // Feature 1: track recently played
     final playedId = list[i].id;
     recentIds.remove(playedId);
     recentIds.insert(0, playedId);
@@ -1904,10 +1793,7 @@ class Store extends ChangeNotifier {
       player.setShuffleModeEnabled(shuffle);
       player.setSpeed(speed);
       player.play();
-    } catch (_) {
-      // Playback setup failed (bad file, ExoPlayer error) — don't crash the app
-    }
-    // Persist duration once known (YouTube downloads have no embedded duration tag)
+    } catch (_) {}
     player.durationStream
         .firstWhere((d) => d != null && d.inMilliseconds > 0)
         .then((d) {
@@ -1921,35 +1807,33 @@ class Store extends ChangeNotifier {
         .catchError((_) {});
   }
 
-  // Rebuild the player's audio source in-place so the notification picks up
-  // updated art/title after enrichment, without audible interruption.
   Future<void> _refreshCurrentMediaItem() async {
     try {
-    final idx = player.currentIndex;
-    if (idx == null || idx >= queue.length) return;
-    final pos = player.position;
-    final wasPlaying = player.playing;
-    await player.setAudioSource(
-      ConcatenatingAudioSource(
-        children: [
-          for (final s in queue)
-            AudioSource.file(
-              s.path,
-              tag: MediaItem(
-                id: s.id,
-                title: s.title,
-                artist: s.artist,
-                artUri: s.art != null ? Uri.file(s.art!) : null,
-                duration: s.dur > 0 ? Duration(milliseconds: s.dur) : null,
+      final idx = player.currentIndex;
+      if (idx == null || idx >= queue.length) return;
+      final pos = player.position;
+      final wasPlaying = player.playing;
+      await player.setAudioSource(
+        ConcatenatingAudioSource(
+          children: [
+            for (final s in queue)
+              AudioSource.file(
+                s.path,
+                tag: MediaItem(
+                  id: s.id,
+                  title: s.title,
+                  artist: s.artist,
+                  artUri: s.art != null ? Uri.file(s.art!) : null,
+                  duration: s.dur > 0 ? Duration(milliseconds: s.dur) : null,
+                ),
               ),
-            ),
-        ],
-      ),
-      initialIndex: idx,
-      initialPosition: pos,
-    );
-    if (wasPlaying) player.play();
-    } catch (_) {} // don't crash if player state changed mid-enrich
+          ],
+        ),
+        initialIndex: idx,
+        initialPosition: pos,
+      );
+      if (wasPlaying) player.play();
+    } catch (_) {}
   }
 
   void toggleShuffle() {
@@ -1987,7 +1871,39 @@ class Store extends ChangeNotifier {
   }
 }
 
-// ---------------------------------------------------------------- helpers
+class _AnimatedTap extends StatefulWidget {
+  final VoidCallback onTap;
+  final Widget child;
+  const _AnimatedTap({required this.onTap, required this.child});
+  @override
+  State<_AnimatedTap> createState() => _AnimatedTapState();
+}
+
+class _AnimatedTapState extends State<_AnimatedTap> with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 100));
+    _scale = Tween<double>(begin: 1.0, end: 0.95).animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut));
+  }
+
+  @override
+  void dispose() { _ctrl.dispose(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => _ctrl.forward(),
+      onTapUp: (_) { _ctrl.reverse(); widget.onTap(); },
+      onTapCancel: () => _ctrl.reverse(),
+      child: ScaleTransition(scale: _scale, child: widget.child),
+    );
+  }
+}
+
 Color _col(String s) {
   var h = 0;
   for (final r in s.runes) {
@@ -2027,82 +1943,53 @@ Future<String?> askName(BuildContext c, String title, [String init = '']) {
   );
 }
 
-Future<void> editSongInfo(BuildContext c, Song s) async {
-  final titleCtl = TextEditingController(text: s.title);
-  final artistCtl = TextEditingController(
-    text: s.artist == 'Unknown artist' ? '' : s.artist,
-  );
-  final confirmed = await showDialog<bool>(
-    context: c,
-    builder: (d) => AlertDialog(
-      title: const Text('Edit song info'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: titleCtl,
-            autofocus: true,
-            decoration: const InputDecoration(labelText: 'Title'),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: artistCtl,
-            decoration: const InputDecoration(labelText: 'Artist'),
-          ),
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(d, false),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(d, true),
-          child: const Text('Save & refresh'),
-        ),
-      ],
-    ),
-  );
-  if (confirmed != true) return;
-  final newTitle = titleCtl.text.trim();
-  final newArtist = artistCtl.text.trim();
-  await store.editSongInfo(
-    s,
-    newTitle,
-    newArtist.isEmpty ? 'Unknown artist' : newArtist,
-  );
-  if (c.mounted) snack(c, 'Saved — fetching lyrics…');
-}
-
 void addToPlaylist(BuildContext c, Song s) {
   showModalBottomSheet(
     context: c,
+    backgroundColor: const Color(0xFF1E1E1E),
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+    ),
     builder: (d) => SafeArea(
-      child: ListView(
-        shrinkWrap: true,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          ListTile(
-            leading: const Icon(Icons.add),
-            title: const Text('New playlist'),
-            onTap: () async {
-              Navigator.pop(d);
-              final n = await askName(c, 'New playlist');
-              if (n != null && n.isNotEmpty) {
-                store.newList(n, add: s.id);
-                if (c.mounted) snack(c, 'Added to $n');
-              }
-            },
-          ),
-          for (final l in store.lists)
-            ListTile(
-              leading: const Icon(Icons.queue_music),
-              title: Text(l.name),
-              onTap: () {
-                store.addTo(l, s.id);
-                Navigator.pop(d);
-                snack(c, 'Added to ${l.name}');
-              },
+          const SizedBox(height: 12),
+          Container(
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+              color: Colors.white24,
+              borderRadius: BorderRadius.circular(2),
             ),
+          ),
+          ListView(
+            shrinkWrap: true,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.add),
+                title: const Text('New playlist'),
+                onTap: () async {
+                  Navigator.pop(d);
+                  final n = await askName(c, 'New playlist');
+                  if (n != null && n.isNotEmpty) {
+                    store.newList(n, add: s.id);
+                    if (c.mounted) snack(c, 'Added to $n');
+                  }
+                },
+              ),
+              for (final l in store.lists)
+                ListTile(
+                  leading: const Icon(Icons.queue_music),
+                  title: Text(l.name),
+                  onTap: () {
+                    store.addTo(l, s.id);
+                    Navigator.pop(d);
+                    snack(c, 'Added to ${l.name}');
+                  },
+                ),
+            ],
+          ),
         ],
       ),
     ),
@@ -2112,21 +1999,39 @@ void addToPlaylist(BuildContext c, Song s) {
 void pickSpeed(BuildContext c) {
   showModalBottomSheet(
     context: c,
+    backgroundColor: const Color(0xFF1E1E1E),
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+    ),
     builder: (d) => SafeArea(
-      child: ListView(
-        shrinkWrap: true,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          for (final v in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
-            ListTile(
-              title: Text('${v}x'),
-              trailing: store.speed == v
-                  ? const Icon(Icons.check, color: green)
-                  : null,
-              onTap: () {
-                store.setSpeed(v);
-                Navigator.pop(d);
-              },
+          const SizedBox(height: 12),
+          Container(
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+              color: Colors.white24,
+              borderRadius: BorderRadius.circular(2),
             ),
+          ),
+          ListView(
+            shrinkWrap: true,
+            children: [
+              for (final v in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
+                ListTile(
+                  title: Text('${v}x'),
+                  trailing: store.speed == v
+                      ? const Icon(Icons.check, color: green)
+                      : null,
+                  onTap: () {
+                    store.setSpeed(v);
+                    Navigator.pop(d);
+                  },
+                ),
+            ],
+          ),
         ],
       ),
     ),
@@ -2136,18 +2041,36 @@ void pickSpeed(BuildContext c) {
 void pickSleep(BuildContext c) {
   showModalBottomSheet(
     context: c,
+    backgroundColor: const Color(0xFF1E1E1E),
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+    ),
     builder: (d) => SafeArea(
-      child: ListView(
-        shrinkWrap: true,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          for (final m in <int?>[null, 5, 15, 30, 45, 60])
-            ListTile(
-              title: Text(m == null ? 'Off' : '$m minutes'),
-              onTap: () {
-                store.setSleep(m);
-                Navigator.pop(d);
-              },
+          const SizedBox(height: 12),
+          Container(
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+              color: Colors.white24,
+              borderRadius: BorderRadius.circular(2),
             ),
+          ),
+          ListView(
+            shrinkWrap: true,
+            children: [
+              for (final m in <int?>[null, 5, 15, 30, 45, 60])
+                ListTile(
+                  title: Text(m == null ? 'Off' : '$m minutes'),
+                  onTap: () {
+                    store.setSleep(m);
+                    Navigator.pop(d);
+                  },
+                ),
+            ],
+          ),
         ],
       ),
     ),
@@ -2157,7 +2080,8 @@ void pickSleep(BuildContext c) {
 class Art extends StatelessWidget {
   final Song s;
   final double size, radius;
-  const Art(this.s, this.size, {super.key, this.radius = 6});
+  final bool useHero;
+  const Art(this.s, this.size, {super.key, this.radius = 6, this.useHero = false});
   @override
   Widget build(BuildContext context) {
     final ph = Container(
@@ -2174,31 +2098,34 @@ class Art extends StatelessWidget {
       ),
     );
     final a = s.art;
-    if (a == null) return ph;
-    // Image.file reports missing/corrupt cache files through errorBuilder.
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(radius),
-      child: Image.file(
-        File(a),
-        width: size,
-        height: size,
-        fit: BoxFit.cover,
-        cacheWidth: (size * 2).round(),
-        gaplessPlayback: true,
-        errorBuilder: (_, __, ___) => ph,
-      ),
-    );
+    Widget img = a == null
+        ? ph
+        : ClipRRect(
+            borderRadius: BorderRadius.circular(radius),
+            child: Image.file(
+              File(a),
+              width: size,
+              height: size,
+              fit: BoxFit.cover,
+              cacheWidth: (size * 2).round(),
+              gaplessPlayback: true,
+              errorBuilder: (_, __, ___) => ph,
+            ),
+          );
+    if (useHero) {
+      return Hero(tag: 'album_art_${s.id}', child: img);
+    }
+    return img;
   }
 }
 
-// ---------------------------------------------------------------- home
 class Home extends StatefulWidget {
   const Home({super.key});
   @override
   State<Home> createState() => _HomeState();
 }
 
-class _HomeState extends State<Home> {
+class _HomeState extends State<Home> with TickerProviderStateMixin {
   int tab = 0;
   String q = '';
   String? openPl;
@@ -2215,7 +2142,7 @@ class _HomeState extends State<Home> {
       leading: Stack(
         clipBehavior: Clip.none,
         children: [
-          Art(s, 48),
+          Art(s, 56, useHero: true),
           if (s.tagsBad)
             Positioned(
               right: -4,
@@ -2319,11 +2246,9 @@ class _HomeState extends State<Home> {
     String empty = '',
     Widget? body,
   }) {
-    // Sticky header (title + search + play row) above a scrollable body
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // ── sticky section ──────────────────────────────────────────────
         Material(
           color: const Color(0xFF121212),
           child: Column(
@@ -2399,7 +2324,6 @@ class _HomeState extends State<Home> {
             ],
           ),
         ),
-        // ── scrollable body ─────────────────────────────────────────────
         Expanded(
           child:
               body ??
@@ -2454,7 +2378,10 @@ class _HomeState extends State<Home> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: const Color(0xFF121212),
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
       builder: (_) => const _BatchImportSheet(),
     );
   }
@@ -2463,7 +2390,7 @@ class _HomeState extends State<Home> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: const Color(0xFF121212),
+      backgroundColor: const Color(0xFF1E1E1E),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
@@ -2482,6 +2409,8 @@ class _HomeState extends State<Home> {
     final overall = total == 0 ? 0.0 : done / total;
     return Card(
       color: const Color(0xFF222222),
+      elevation: 3,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
@@ -2545,8 +2474,7 @@ class _HomeState extends State<Home> {
           style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
         ),
         const SizedBox(height: 12),
-        // Search / Download bar
-        GestureDetector(
+        _AnimatedTap(
           onTap: _openSearch,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -2579,17 +2507,24 @@ class _HomeState extends State<Home> {
             children: [
               for (var i = 0; i < min(6, songs.length); i++)
                 InkWell(
-                  borderRadius: BorderRadius.circular(6),
+                  borderRadius: BorderRadius.circular(12),
                   onTap: () => store.play(songs, i),
                   child: Container(
                     decoration: BoxDecoration(
-                      color: const Color(0xFF2A2A2A),
-                      borderRadius: BorderRadius.circular(6),
+                      color: const Color(0xFF1E1E1E),
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.25),
+                          blurRadius: 4,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
                     ),
                     clipBehavior: Clip.antiAlias,
                     child: Row(
                       children: [
-                        Art(songs[i], 56, radius: 0),
+                        Art(songs[i], 56, radius: 0, useHero: true),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Text(
@@ -2667,7 +2602,7 @@ class _HomeState extends State<Home> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Art(songs[i], 130, radius: 8),
+                      Art(songs[i], 130, radius: 8, useHero: true),
                       const SizedBox(height: 6),
                       Text(
                         songs[i].title,
@@ -2810,7 +2745,6 @@ class _HomeState extends State<Home> {
     );
   }
 
-  // Feature 1: Library tab body with recently played section
   Widget _libraryBody(String? cur) {
     final allSongs = store.songs;
     final k = q.toLowerCase();
@@ -2831,12 +2765,15 @@ class _HomeState extends State<Home> {
         ),
       );
     }
-    // A single lazy list avoids building every tile at once and keeps memory
-    // stable for libraries with thousands of tracks.
     return ListView.builder(
       itemCount: filtered.length,
       cacheExtent: 600,
-      itemBuilder: (c, i) => _tile(filtered, i, cur, null),
+      itemBuilder: (c, i) {
+        return _StaggeredListItem(
+          index: i,
+          child: _tile(filtered, i, cur, null),
+        );
+      },
     );
   }
 
@@ -2860,7 +2797,7 @@ class _HomeState extends State<Home> {
           search: true,
           menu: _libMenu(),
           empty: 'Tap + to add songs or scan a folder',
-          body: _libraryBody(cur), // Feature 1: custom body
+          body: _libraryBody(cur),
         );
       case 2:
         return openPl == null ? _playlists() : _plDetail(cur);
@@ -2991,7 +2928,53 @@ class _HomeState extends State<Home> {
   }
 }
 
-// ---------------------------------------------------------------- batch import sheet
+class _StaggeredListItem extends StatefulWidget {
+  final int index;
+  final Widget child;
+  const _StaggeredListItem({required this.index, required this.child});
+  @override
+  State<_StaggeredListItem> createState() => _StaggeredListItemState();
+}
+
+class _StaggeredListItemState extends State<_StaggeredListItem>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _fadeAnimation;
+  late final Animation<Offset> _slideAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+    );
+    _fadeAnimation = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
+    _slideAnimation = Tween<Offset>(
+      begin: const Offset(0, 0.1),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOut));
+
+    Future.delayed(Duration(milliseconds: min(widget.index * 30, 300)), () {
+      if (mounted) _controller.forward();
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _fadeAnimation,
+      child: SlideTransition(position: _slideAnimation, child: widget.child),
+    );
+  }
+}
+
 class _BatchImportSheet extends StatefulWidget {
   const _BatchImportSheet();
   @override
@@ -3032,12 +3015,23 @@ class _BatchImportSheetState extends State<_BatchImportSheet> {
   Widget build(BuildContext context) {
     final bottom = MediaQuery.viewInsetsOf(context).bottom;
     return Padding(
-      padding: EdgeInsets.fromLTRB(20, 20, 20, bottom + 20),
+      padding: EdgeInsets.fromLTRB(20, 12, 20, bottom + 20),
       child: SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
             const Text(
               'Import playlist or batch',
               style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
@@ -3090,7 +3084,6 @@ class _BatchImportSheetState extends State<_BatchImportSheet> {
   }
 }
 
-// ---------------------------------------------------------------- search + download sheet
 class _SearchSheet extends StatefulWidget {
   const _SearchSheet();
   @override
@@ -3102,7 +3095,6 @@ class _SearchSheetState extends State<_SearchSheet> {
   List<InvResult> _results = [];
   bool _searching = false;
   String _searchErr = '';
-  // videoId -> progress (null = not downloading, -1 = done, 0..1 = progress)
   final Map<String, double?> _dl = {};
 
   Future<void> _search() async {
@@ -3131,10 +3123,9 @@ class _SearchSheetState extends State<_SearchSheet> {
   }
 
   Future<void> _download(InvResult r) async {
-    if (_dl[r.videoId] != null) return; // already downloading/done
+    if (_dl[r.videoId] != null) return;
     setState(() => _dl[r.videoId] = 0);
     final err = await store.downloadFromInvidious(r, (pct) {
-      // Progress callbacks can be much more frequent than frame time.
       if (mounted &&
           (_dl[r.videoId] == null ||
               (pct - (_dl[r.videoId] ?? 0)).abs() >= .01)) {
@@ -3146,7 +3137,7 @@ class _SearchSheetState extends State<_SearchSheet> {
       setState(() => _dl.remove(r.videoId));
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
     } else {
-      setState(() => _dl[r.videoId] = -1); // done
+      setState(() => _dl[r.videoId] = -1);
     }
   }
 
@@ -3319,7 +3310,6 @@ class _SearchSheetState extends State<_SearchSheet> {
   }
 }
 
-// ---------------------------------------------------------------- player UI
 class MiniPlayer extends StatelessWidget {
   const MiniPlayer({super.key});
   @override
@@ -3334,7 +3324,15 @@ class MiniPlayer extends StatelessWidget {
             return const SizedBox.shrink();
           final s = store.queue[i];
           final lk = store.liked.contains(s.id);
-          return Container(
+          return TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0.0, end: 1.0),
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOutCubic,
+            builder: (context, value, child) => FractionalTranslation(
+              translation: Offset(0, 1 - value),
+              child: Opacity(opacity: value, child: child),
+            ),
+            child: Container(
             color: const Color(0xFF1E1E1E),
             padding: const EdgeInsets.fromLTRB(12, 8, 4, 0),
             child: Column(
@@ -3346,11 +3344,25 @@ class MiniPlayer extends StatelessWidget {
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onTap: () => Navigator.of(context).push(
-                          MaterialPageRoute(builder: (_) => const NowPlaying()),
+                          PageRouteBuilder(
+                            pageBuilder: (context, animation, secondaryAnimation) => const NowPlaying(),
+                            transitionsBuilder: (context, animation, secondaryAnimation, child) {
+                              const begin = Offset(0.0, 1.0);
+                              const end = Offset.zero;
+                              const curve = Curves.easeOutCubic;
+                              var tween = Tween(begin: begin, end: end).chain(CurveTween(curve: curve));
+                              var offsetAnimation = animation.drive(tween);
+                              return SlideTransition(
+                                position: offsetAnimation,
+                                child: FadeTransition(opacity: animation, child: child),
+                              );
+                            },
+                            transitionDuration: const Duration(milliseconds: 350),
+                          ),
                         ),
                         child: Row(
                           children: [
-                            Art(s, 44),
+                            Art(s, 44, useHero: true),
                             const SizedBox(width: 10),
                             Expanded(
                               child: Column(
@@ -3415,6 +3427,7 @@ class MiniPlayer extends StatelessWidget {
                 const SeekBar(),
               ],
             ),
+          ),
           );
         },
       ),
@@ -3428,8 +3441,28 @@ class NowPlaying extends StatefulWidget {
   State<NowPlaying> createState() => _NowPlayingState();
 }
 
-class _NowPlayingState extends State<NowPlaying> {
+class _NowPlayingState extends State<NowPlaying> with TickerProviderStateMixin {
   String? _lastArt;
+  late final AnimationController _pulseController;
+  late final Animation<double> _pulseAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat(reverse: true);
+    _pulseAnimation = Tween<double>(begin: 0.96, end: 1.0).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _pulseController.dispose();
+    super.dispose();
+  }
 
   Future<void> _extractPalette(Song s) async {
     if (s.art == null) return;
@@ -3494,59 +3527,112 @@ class _NowPlayingState extends State<NowPlaying> {
                 ),
               ),
               body: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
+                padding: const EdgeInsets.fromLTRB(28, 8, 28, 24),
                 child: Column(
                   children: [
                     Expanded(
                       child: LayoutBuilder(
-                        builder: (c, b) => Center(
-                          child: Art(
-                            s,
-                            min(b.maxWidth, b.maxHeight),
-                            radius: 12,
-                          ),
-                        ),
+                        builder: (c, b) {
+                          final dimension = min(b.maxWidth, b.maxHeight);
+                          return Center(
+                            child: StreamBuilder<PlayerState>(
+                              stream: player.playerStateStream,
+                              builder: (context, stateSnap) {
+                                final isPlaying = stateSnap.data?.playing ?? false;
+                                if (isPlaying) {
+                                  if (!_pulseController.isAnimating) _pulseController.repeat(reverse: true);
+                                } else {
+                                  if (_pulseController.isAnimating) _pulseController.stop();
+                                }
+                                return ScaleTransition(
+                                  scale: isPlaying ? _pulseAnimation : const AlwaysStoppedAnimation(1.0),
+                                  child: Container(
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(16),
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: Colors.black.withOpacity(0.4),
+                                          blurRadius: 16,
+                                          offset: const Offset(0, 8),
+                                        ),
+                                      ],
+                                    ),
+                                    child: AnimatedSwitcher(
+                                      duration: const Duration(milliseconds: 400),
+                                      transitionBuilder: (child, anim) => FadeTransition(
+                                        opacity: anim,
+                                        child: ScaleTransition(scale: Tween(begin: 0.92, end: 1.0).animate(anim), child: child),
+                                      ),
+                                      child: Art(s, dimension, radius: 16, useHero: true, key: ValueKey(s.id)),
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          );
+                        },
                       ),
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 24),
                     Row(
                       children: [
                         Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                s.title,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 22,
-                                  fontWeight: FontWeight.w800,
+                          child: AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 300),
+                            transitionBuilder: (child, anim) => FadeTransition(
+                              opacity: anim,
+                              child: SlideTransition(
+                                position: Tween(begin: const Offset(0, 0.15), end: Offset.zero).animate(
+                                  CurvedAnimation(parent: anim, curve: Curves.easeOut),
                                 ),
+                                child: child,
                               ),
-                              Text(
-                                s.artist,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  color: Colors.white70,
+                            ),
+                            child: Column(
+                              key: ValueKey(s.id),
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  s.title,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 24,
+                                    fontWeight: FontWeight.w800,
+                                  ),
                                 ),
-                              ),
-                            ],
+                                const SizedBox(height: 4),
+                                Text(
+                                  s.artist,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 16,
+                                    color: Colors.white70,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
-                        IconButton(
-                          iconSize: 30,
-                          icon: Icon(
-                            lk ? Icons.favorite : Icons.favorite_border,
-                            color: lk ? green : Colors.white,
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 250),
+                          transitionBuilder: (child, anim) => ScaleTransition(scale: anim, child: FadeTransition(opacity: anim, child: child)),
+                          child: IconButton(
+                            key: ValueKey(lk),
+                            iconSize: 32,
+                            icon: Icon(
+                              lk ? Icons.favorite : Icons.favorite_border,
+                              color: lk ? green : Colors.white,
+                            ),
+                            onPressed: () => store.like(s.id),
                           ),
-                          onPressed: () => store.like(s.id),
                         ),
                       ],
                     ),
+                    const SizedBox(height: 8),
                     const SeekBar(),
+                    const SizedBox(height: 12),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                       children: [
@@ -3558,7 +3644,7 @@ class _NowPlayingState extends State<NowPlaying> {
                           onPressed: store.toggleShuffle,
                         ),
                         IconButton(
-                          iconSize: 40,
+                          iconSize: 36,
                           icon: const Icon(Icons.skip_previous),
                           onPressed: () => player.seekToPrevious(),
                         ),
@@ -3566,22 +3652,33 @@ class _NowPlayingState extends State<NowPlaying> {
                           stream: player.playerStateStream,
                           builder: (c, st) {
                             final playing = st.data?.playing ?? false;
-                            return IconButton.filled(
-                              iconSize: 40,
-                              style: IconButton.styleFrom(
-                                backgroundColor: Colors.white,
-                                foregroundColor: Colors.black,
+                            return Material(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(32),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(32),
+                                onTap: () => playing ? player.pause() : player.play(),
+                                child: Container(
+                                  width: 64,
+                                  height: 64,
+                                  alignment: Alignment.center,
+                                  child: AnimatedSwitcher(
+                                    duration: const Duration(milliseconds: 200),
+                                    transitionBuilder: (child, anim) => ScaleTransition(scale: anim, child: child),
+                                    child: Icon(
+                                      key: ValueKey(playing),
+                                      playing ? Icons.pause : Icons.play_arrow,
+                                      size: 36,
+                                      color: Colors.black,
+                                    ),
+                                  ),
+                                ),
                               ),
-                              icon: Icon(
-                                playing ? Icons.pause : Icons.play_arrow,
-                              ),
-                              onPressed: () =>
-                                  playing ? player.pause() : player.play(),
                             );
                           },
                         ),
                         IconButton(
-                          iconSize: 40,
+                          iconSize: 36,
                           icon: const Icon(Icons.skip_next),
                           onPressed: () => player.seekToNext(),
                         ),
@@ -3598,7 +3695,7 @@ class _NowPlayingState extends State<NowPlaying> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 20),
                     Wrap(
                       alignment: WrapAlignment.center,
                       spacing: 8,
@@ -3618,9 +3715,7 @@ class _NowPlayingState extends State<NowPlaying> {
                           ),
                           onPressed: () => pickSleep(context),
                         ),
-                        // Feature 3: always show lyrics chip; fetch on demand if not loaded
                         _LyricsChip(s: s),
-                        // Feature 9: artist bio via Last.fm
                         _BioChip(s: s),
                       ],
                     ),
@@ -3635,7 +3730,6 @@ class _NowPlayingState extends State<NowPlaying> {
   }
 }
 
-// Feature 3: Lyrics chip — always visible; fetches on demand if lyrics not loaded yet
 class _LyricsChip extends StatefulWidget {
   final Song s;
   const _LyricsChip({required this.s});
@@ -3648,12 +3742,10 @@ class _LyricsChipState extends State<_LyricsChip> {
 
   Future<void> _fetchAndOpen() async {
     final s = widget.s;
-    // If already loaded, open straight away
     if (s.lyrics != null || s.syncedLyrics != null) {
       _open(s);
       return;
     }
-    // Fetch now
     setState(() => _fetching = true);
     final map = await _fetchLrcLibLyrics(s.title, s.artist, durMs: s.dur);
     if (map['plain'] != null) s.lyrics = map['plain'];
@@ -3675,7 +3767,7 @@ class _LyricsChipState extends State<_LyricsChip> {
       isScrollControlled: true,
       isDismissible: false,
       enableDrag: true,
-      backgroundColor: const Color(0xFF1A1A1A),
+      backgroundColor: const Color(0xFF1E1E1E),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
@@ -3699,7 +3791,6 @@ class _LyricsChipState extends State<_LyricsChip> {
   }
 }
 
-// Feature 9: Artist bio via Last.fm
 Future<Map<String, dynamic>?> _fetchArtistBio(String artist) async {
   if (artist == 'Unknown artist' || artist.trim().isEmpty) return null;
   try {
@@ -3713,7 +3804,6 @@ Future<Map<String, dynamic>?> _fetchArtistBio(String artist) async {
     final art = j['artist'] as Map<String, dynamic>?;
     if (art == null) return null;
     var bio = ((art['bio'] as Map?)?['summary'] as String? ?? '').trim();
-    // Strip Last.fm "Read more on Last.fm" link
     bio = bio.replaceAll(RegExp(r'<a[^>]*>.*?</a>', dotAll: true), '').trim();
     bio = bio.replaceAll(RegExp(r'\s+'), ' ').trim();
     final tags = ((art['tags'] as Map?)?['tag'] as List? ?? [])
@@ -3765,7 +3855,7 @@ class _BioChipState extends State<_BioChip> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: const Color(0xFF1A1A1A),
+      backgroundColor: const Color(0xFF1E1E1E),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
@@ -3820,7 +3910,8 @@ class _ArtistBioSheet extends StatelessWidget {
         children: [
           Center(
             child: Container(
-              width: 40, height: 4,
+              width: 40,
+              height: 4,
               decoration: BoxDecoration(
                 color: Colors.white24,
                 borderRadius: BorderRadius.circular(2),
@@ -3867,7 +3958,6 @@ class _ArtistBioSheet extends StatelessWidget {
   }
 }
 
-// Feature 3: Synced lyrics sheet
 class LyricsSheet extends StatefulWidget {
   final Song s;
   const LyricsSheet({super.key, required this.s});
@@ -3916,7 +4006,6 @@ class _LyricsSheetState extends State<LyricsSheet> {
       minChildSize: 0.3,
       builder: (_, sheetSc) => Column(
         children: [
-          // Header
           const SizedBox(height: 12),
           Container(
             width: 40,
@@ -3927,7 +4016,6 @@ class _LyricsSheetState extends State<LyricsSheet> {
             ),
           ),
           const SizedBox(height: 8),
-          // Close button row
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Row(
@@ -3949,21 +4037,17 @@ class _LyricsSheetState extends State<LyricsSheet> {
             style: const TextStyle(color: Colors.white54, fontSize: 13),
           ),
           const Divider(height: 24, color: Colors.white12),
-          // Lyrics body
           Expanded(
             child: _isSynced
                 ? StreamBuilder<Duration>(
                     stream: player.positionStream,
                     builder: (ctx, snap) {
                       final posMs =
-                          (snap.data?.inMilliseconds ?? 0) +
-                          300; // 300ms lookahead to compensate for display lag
-                      // Find current line: last line whose ms <= posMs
+                          (snap.data?.inMilliseconds ?? 0) + 300;
                       var curIdx = -1;
                       for (var i = 0; i < _lines.length; i++) {
                         if (_lines[i].ms <= posMs) curIdx = i;
                       }
-                      // Auto-scroll after frame
                       if (curIdx >= 0) {
                         WidgetsBinding.instance.addPostFrameCallback(
                           (_) => _scrollToLine(curIdx),
@@ -4063,9 +4147,7 @@ class SeekBar extends StatelessWidget {
     );
   }
 }
-// END_OF_SOUNDWAVE
 
-// ---- in-app debug log viewer
 void _showLyricLog(BuildContext c, Song s) {
   showDialog(
     context: c,
