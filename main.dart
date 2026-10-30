@@ -2672,27 +2672,30 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
               Text('Affects colors, surfaces, and feel across the whole app',
                 style: TextStyle(color: swt.onSurface2, fontSize: 13)),
               const SizedBox(height: 16),
-              for (final entry in [
-                (AppTheme.living, '🎨', 'Living Color',
-                  'Dynamic — shifts with your album art. Every song paints the app.'),
-                (AppTheme.retro,  '🎷', 'Retro Warmth',
-                  'Vinyl vibes. Warm ambers, grain texture, analog feel.'),
-                (AppTheme.glass,  '✦',  'Dark Glass',
-                  'AMOLED black. Frosted cards. Neon violet accents.'),
-              ])
-                _ThemeTile(
-                  emoji: entry.$2,
-                  name: entry.$3,
-                  desc: entry.$4,
-                  selected: themeNotifier.current == entry.$1,
-                  accentColor: entry.$1 == AppTheme.living
-                    ? _livingBase.withAccent(const Color(0xFF1DB954)).accent
-                    : entry.$1 == AppTheme.retro ? _retroTheme.accent : _glassTheme.accent,
+              ...[
+                [AppTheme.living, '🎨', 'Living Color',
+                  'Dynamic — shifts with your album art. Every song paints the app.'],
+                [AppTheme.retro,  '🎷', 'Retro Warmth',
+                  'Vinyl vibes. Warm ambers, grain texture, analog feel.'],
+                [AppTheme.glass,  '✦',  'Dark Glass',
+                  'AMOLED black. Frosted cards. Neon violet accents.'],
+              ].map((e) {
+                final appTheme = e[0] as AppTheme;
+                final accent = appTheme == AppTheme.living
+                    ? const Color(0xFF1DB954)
+                    : appTheme == AppTheme.retro ? _retroTheme.accent : _glassTheme.accent;
+                return _ThemeTile(
+                  emoji: e[1] as String,
+                  name: e[2] as String,
+                  desc: e[3] as String,
+                  selected: themeNotifier.current == appTheme,
+                  accentColor: accent,
                   onTap: () {
-                    themeNotifier.setTheme(entry.$1);
+                    themeNotifier.setTheme(appTheme);
                     Navigator.pop(ctx);
                   },
-                ),
+                );
+              }),
             ],
           ),
         ),
