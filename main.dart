@@ -68,14 +68,14 @@ class SWTheme {
 /// 1. Living Color — dynamic palette extracted from album art
 const _livingBase = SWTheme(
   name: 'Living Color',
-  accent: Color(0xFF1DB954),        // overridden per-song by palette
-  bg: Color(0xFF0A0A0A),
-  surface: Color(0xFF161616),
-  surface2: Color(0xFF222222),
+  accent: Color(0xFF1ED760),        // Spotify-leaning green, overridden by palette
+  bg: Color(0xFF121212),
+  surface: Color(0xFF181818),
+  surface2: Color(0xFF282828),
   onSurface: Color(0xFFFFFFFF),
   onSurface2: Color(0xFFB3B3B3),
   navBg: Color(0xFF000000),
-  navIndicator: Color(0xFF1A1A1A),
+  navIndicator: Color(0xFF282828),
 );
 
 /// 2. Retro Warmth — vinyl/cassette warmth
@@ -2402,10 +2402,14 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
     final s = list[i];
     final on = s.id == cur, lk = store.liked.contains(s.id);
     return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
       leading: Stack(
         clipBehavior: Clip.none,
         children: [
-          Art(s, 56, useHero: true),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: Art(s, 56, useHero: true),
+          ),
           if (s.tagsBad)
             Positioned(
               right: -4,
@@ -2672,30 +2676,27 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
               Text('Affects colors, surfaces, and feel across the whole app',
                 style: TextStyle(color: swt.onSurface2, fontSize: 13)),
               const SizedBox(height: 16),
-              ...[
-                [AppTheme.living, '🎨', 'Living Color',
-                  'Dynamic — shifts with your album art. Every song paints the app.'],
-                [AppTheme.retro,  '🎷', 'Retro Warmth',
-                  'Vinyl vibes. Warm ambers, grain texture, analog feel.'],
-                [AppTheme.glass,  '✦',  'Dark Glass',
-                  'AMOLED black. Frosted cards. Neon violet accents.'],
-              ].map((e) {
-                final appTheme = e[0] as AppTheme;
-                final accent = appTheme == AppTheme.living
-                    ? const Color(0xFF1DB954)
-                    : appTheme == AppTheme.retro ? _retroTheme.accent : _glassTheme.accent;
-                return _ThemeTile(
-                  emoji: e[1] as String,
-                  name: e[2] as String,
-                  desc: e[3] as String,
-                  selected: themeNotifier.current == appTheme,
-                  accentColor: accent,
+              for (final entry in [
+                (AppTheme.living, '🎨', 'Living Color',
+                  'Dynamic — shifts with your album art. Every song paints the app.'),
+                (AppTheme.retro,  '🎷', 'Retro Warmth',
+                  'Vinyl vibes. Warm ambers, grain texture, analog feel.'),
+                (AppTheme.glass,  '✦',  'Dark Glass',
+                  'AMOLED black. Frosted cards. Neon violet accents.'),
+              ])
+                _ThemeTile(
+                  emoji: entry.$2,
+                  name: entry.$3,
+                  desc: entry.$4,
+                  selected: themeNotifier.current == entry.$1,
+                  accentColor: entry.$1 == AppTheme.living
+                    ? _livingBase.withAccent(const Color(0xFF1DB954)).accent
+                    : entry.$1 == AppTheme.retro ? _retroTheme.accent : _glassTheme.accent,
                   onTap: () {
-                    themeNotifier.setTheme(appTheme);
+                    themeNotifier.setTheme(entry.$1);
                     Navigator.pop(ctx);
                   },
-                );
-              }),
+                ),
             ],
           ),
         ),
@@ -2790,172 +2791,301 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
 
   Widget _home(String? cur) {
     final songs = store.songs;
+    final liked = songs.where((s) => store.liked.contains(s.id)).toList();
+    final recent = songs.length <= 12
+        ? List<Song>.from(songs.reversed)
+        : songs.sublist(songs.length - 12).reversed.toList();
     final h = DateTime.now().hour;
+    final greet = h < 12
+        ? 'Good morning'
+        : h < 18
+            ? 'Good afternoon'
+            : 'Good evening';
+
+    Widget sectionTitle(String t, {VoidCallback? onSeeAll}) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(4, 20, 4, 10),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                t,
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.3,
+                ),
+              ),
+            ),
+            if (onSeeAll != null)
+              GestureDetector(
+                onTap: onSeeAll,
+                child: Text(
+                  'See all',
+                  style: TextStyle(
+                    color: swt.accent,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      );
+    }
+
+    Widget shortcut({
+      required IconData icon,
+      required String label,
+      required Color color,
+      required VoidCallback onTap,
+      String? subtitle,
+    }) {
+      return Expanded(
+        child: Material(
+          color: swt.surface2,
+          borderRadius: BorderRadius.circular(10),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: onTap,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+              child: Row(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: color.withOpacity(0.18),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Icon(icon, color: color, size: 22),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 14,
+                          ),
+                        ),
+                        if (subtitle != null)
+                          Text(
+                            subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: swt.onSurface2,
+                              fontSize: 11,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (songs.isEmpty) {
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(20, 24, 20, 40),
+        children: [
+          Text(
+            greet,
+            style: const TextStyle(
+              fontSize: 28,
+              fontWeight: FontWeight.w800,
+              letterSpacing: -0.5,
+            ),
+          ),
+          const SizedBox(height: 28),
+          Container(
+            padding: const EdgeInsets.all(28),
+            decoration: BoxDecoration(
+              color: swt.surface,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Column(
+              children: [
+                Icon(Icons.library_music_outlined,
+                    size: 48, color: swt.onSurface2),
+                const SizedBox(height: 16),
+                const Text(
+                  'Your library is empty',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Search YouTube, import a playlist, or scan a folder to get started.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: swt.onSurface2, height: 1.4),
+                ),
+                const SizedBox(height: 20),
+                FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: swt.accent,
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 20, vertical: 12),
+                  ),
+                  onPressed: _openSearch,
+                  icon: const Icon(Icons.search, size: 20),
+                  label: const Text('Find music'),
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
       children: [
         Text(
-          h < 12
-              ? 'Good morning'
-              : h < 18
-              ? 'Good afternoon'
-              : 'Good evening',
-          style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
+          greet,
+          style: const TextStyle(
+            fontSize: 28,
+            fontWeight: FontWeight.w800,
+            letterSpacing: -0.5,
+          ),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 16),
         GestureDetector(
           onTap: _openSearch,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
             decoration: BoxDecoration(
-              color: const Color(0xFF2A2A2A),
-              borderRadius: BorderRadius.circular(30),
+              color: swt.surface2,
+              borderRadius: BorderRadius.circular(24),
             ),
             child: Row(
-              children: const [
-                Icon(Icons.search, color: Colors.white54),
-                SizedBox(width: 10),
+              children: [
+                Icon(Icons.search, color: swt.onSurface2, size: 22),
+                const SizedBox(width: 10),
                 Text(
-                  'Find & download music…',
-                  style: TextStyle(color: Colors.white54),
+                  'Search & download',
+                  style: TextStyle(color: swt.onSurface2, fontSize: 15),
                 ),
               ],
             ),
           ),
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 12),
         _batchProgress(),
-        if (songs.isNotEmpty) ...[
-          GridView.count(
-            crossAxisCount: 2,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            childAspectRatio: 3.1,
-            crossAxisSpacing: 8,
-            mainAxisSpacing: 8,
-            children: [
-              for (var i = 0; i < min(6, songs.length); i++)
-                InkWell(
-                  borderRadius: BorderRadius.circular(12),
-                  onTap: () => store.play(songs, i),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF1E1E1E),
-                      borderRadius: BorderRadius.circular(12),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.25),
-                          blurRadius: 4,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    clipBehavior: Clip.antiAlias,
-                    child: Row(
-                      children: [
-                        Art(songs[i], 56, radius: 0, useHero: true),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            songs[i].title,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w700,
-                              color: songs[i].id == cur ? green : Colors.white,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                      ],
-                    ),
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: 20),
-        ],
+        const SizedBox(height: 8),
         Row(
           children: [
-            Expanded(
-              child: FilledButton.icon(
-                style: FilledButton.styleFrom(
-                  backgroundColor: green,
-                  foregroundColor: Colors.black,
-                  minimumSize: const Size(0, 50),
-                ),
-                onPressed: () => _run(store.addPicked()),
-                icon: const Icon(Icons.add),
-                label: const Text(
-                  'Add songs',
-                  style: TextStyle(fontWeight: FontWeight.w700),
-                ),
-              ),
+            shortcut(
+              icon: Icons.favorite,
+              label: 'Liked',
+              subtitle: '${liked.length} songs',
+              color: const Color(0xFF1ED760),
+              onTap: () => setState(() => tab = 3),
             ),
             const SizedBox(width: 10),
-            Expanded(
-              child: OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(minimumSize: const Size(0, 50)),
-                onPressed: () => _run(store.scanFolder()),
-                icon: const Icon(Icons.folder_open),
-                label: const Text('Scan folder'),
-              ),
+            shortcut(
+              icon: Icons.library_music,
+              label: 'Library',
+              subtitle: '${songs.length} songs',
+              color: const Color(0xFF3D91F4),
+              onTap: () => setState(() => tab = 1),
             ),
           ],
         ),
-        if (songs.isEmpty)
-          const Padding(
-            padding: EdgeInsets.only(top: 24),
-            child: Text(
-              'Your library is empty. Add songs, or scan a folder like Music or Download to import everything in it.',
-              style: TextStyle(color: Colors.white70),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            shortcut(
+              icon: Icons.queue_music,
+              label: 'Playlists',
+              subtitle: '${store.lists.length} lists',
+              color: const Color(0xFFB24BF3),
+              onTap: () => setState(() => tab = 2),
             ),
-          ),
-        if (songs.length > 6) ...[
-          const SizedBox(height: 24),
-          const Text(
-            'Recently added',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
-          ),
-          const SizedBox(height: 12),
+            const SizedBox(width: 10),
+            shortcut(
+              icon: Icons.shuffle,
+              label: 'Shuffle all',
+              subtitle: 'Play everything',
+              color: const Color(0xFFE91429),
+              onTap: () {
+                if (songs.isEmpty) return;
+                store.play(songs, 0);
+                if (!store.shuffle) store.toggleShuffle();
+              },
+            ),
+          ],
+        ),
+        if (recent.isNotEmpty) ...[
+          sectionTitle('Recently added', onSeeAll: () => setState(() => tab = 1)),
           SizedBox(
-            height: 200,
+            height: 170,
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
-              itemCount: min(12, songs.length),
+              itemCount: recent.length,
               separatorBuilder: (_, __) => const SizedBox(width: 12),
-              itemBuilder: (c, i) => GestureDetector(
-                onTap: () => store.play(songs, i),
-                child: SizedBox(
-                  width: 130,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Art(songs[i], 130, radius: 8, useHero: true),
-                      const SizedBox(height: 6),
-                      Text(
-                        songs[i].title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontWeight: FontWeight.w600),
-                      ),
-                      Text(
-                        songs[i].artist,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white54,
-                          fontSize: 12,
+              itemBuilder: (_, i) {
+                final s = recent[i];
+                final on = s.id == cur;
+                return GestureDetector(
+                  onTap: () {
+                    final idx = songs.indexWhere((x) => x.id == s.id);
+                    if (idx >= 0) store.play(songs, idx);
+                  },
+                  child: SizedBox(
+                    width: 120,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Art(s, 120, useHero: false),
                         ),
-                      ),
-                    ],
+                        const SizedBox(height: 8),
+                        Text(
+                          s.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 13,
+                            color: on ? swt.accent : swt.onSurface,
+                          ),
+                        ),
+                        Text(
+                          s.artist,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: swt.onSurface2,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ),
+                );
+              },
             ),
           ),
         ],
+        sectionTitle('Your songs', onSeeAll: () => setState(() => tab = 1)),
+        for (var i = 0; i < min(8, songs.length); i++)
+          _tile(songs, i, cur, null),
       ],
     );
   }
@@ -3126,7 +3256,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
           cur: cur,
           search: true,
           menu: _libMenu(),
-          empty: 'Tap + to add songs or scan a folder',
+          empty: 'Nothing here yet — search, import a playlist, or scan a folder.',
           body: _libraryBody(cur),
         );
       case 2:
@@ -3136,7 +3266,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
           title: 'Liked Songs',
           list: store.songs.where((s) => store.liked.contains(s.id)).toList(),
           cur: cur,
-          empty: 'Tap a ♡ on any song',
+          empty: 'Songs you heart will show up here.',
         );
     }
   }
@@ -3658,9 +3788,13 @@ class MiniPlayer extends StatelessWidget {
             return const SizedBox.shrink();
           final s = store.queue[i];
           final lk = store.liked.contains(s.id);
-          return Container(
-            color: const Color(0xFF1E1E1E),
-            padding: const EdgeInsets.fromLTRB(12, 8, 4, 0),
+          return Material(
+            color: swt.surface,
+            child: Container(
+            decoration: BoxDecoration(
+              border: Border(top: BorderSide(color: Colors.white.withOpacity(0.06))),
+            ),
+            padding: const EdgeInsets.fromLTRB(12, 10, 6, 8),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -3683,13 +3817,16 @@ class MiniPlayer extends StatelessWidget {
                                 child: FadeTransition(opacity: animation, child: child),
                               );
                             },
-                            transitionDuration: const Duration(milliseconds: 350),
+                            transitionDuration: const Duration(milliseconds: 380),
                           ),
                         ),
                         child: Row(
                           children: [
-                            Art(s, 44, useHero: true),
-                            const SizedBox(width: 10),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(6),
+                              child: Art(s, 48, useHero: true),
+                            ),
+                            const SizedBox(width: 12),
                             Expanded(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -3752,6 +3889,7 @@ class MiniPlayer extends StatelessWidget {
                 ),
                 const SeekBar(),
               ],
+            ),
             ),
           );
         },
