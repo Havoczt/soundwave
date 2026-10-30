@@ -804,6 +804,45 @@ Future<List<InvResult>> invSearch(String q) async {
       .toList();
 }
 
+/// Fetch playlist videos via Invidious API (more reliable than youtube_explode for some playlists)
+Future<List<InvResult>> invPlaylist(String playlistId) async {
+  for (final host in _invHosts) {
+    if (_deadHosts.contains(host)) continue;
+    try {
+      final uri = Uri.parse('$host/api/v1/playlists/$playlistId');
+      final r = await http
+          .get(uri, headers: {'User-Agent': 'SoundWave/1.0'})
+          .timeout(const Duration(seconds: 12));
+      if (r.statusCode != 200) {
+        if (r.statusCode >= 500) _deadHosts.add(host);
+        continue;
+      }
+      final data = jsonDecode(r.body);
+      if (data is! Map) continue;
+      final videos = data['videos'] as List? ?? [];
+      final results = <InvResult>[];
+      for (final v in videos.take(200)) {
+        if (v is! Map) continue;
+        final id = '${v['videoId'] ?? ''}';
+        if (id.isEmpty) continue;
+        results.add(InvResult(
+          videoId: id,
+          title: '${v['title'] ?? 'Unknown'}',
+          author: '${v['author'] ?? ''}',
+          thumbnail: (v['videoThumbnails'] is List && (v['videoThumbnails'] as List).isNotEmpty)
+              ? '${(v['videoThumbnails'] as List).first['url'] ?? ''}'
+              : '',
+          lengthSeconds: (v['lengthSeconds'] as num?)?.toInt() ?? 0,
+        ));
+      }
+      if (results.isNotEmpty) return results;
+    } catch (_) {
+      _deadHosts.add(host);
+    }
+  }
+  return [];
+}
+
 const _invHosts = [
   'https://inv.nadeko.net',
   'https://invidious.nerdvpn.de',
@@ -1625,6 +1664,10 @@ class Store extends ChangeNotifier {
 
     if (_isPlaylistInput(value)) {
       final cleanUrl = _cleanPlaylistUrl(value);
+      final idMatch = RegExp(r'[?&]list=([a-zA-Z0-9_-]+)').firstMatch(value);
+      final playlistId = idMatch?.group(1) ?? '';
+
+      // 1) Try youtube_explode first
       final tasks = <BatchDownloadTask>[];
       var index = 0;
       try {
@@ -1642,9 +1685,19 @@ class Store extends ChangeNotifier {
           index++;
         }
       } catch (e) {
-        debugPrint('[batch] playlist parse failed: $e');
-        rethrow;
+        debugPrint('[batch] youtube_explode playlist failed: $e');
       }
+
+      // 2) Fallback to Invidious if empty
+      if (tasks.isEmpty && playlistId.isNotEmpty) {
+        debugPrint('[batch] falling back to Invidious for playlist $playlistId');
+        final invResults = await invPlaylist(playlistId);
+        for (var i = 0; i < invResults.length; i++) {
+          final r = invResults[i];
+          tasks.add(BatchDownloadTask('playlist-$i', r.title)..result = r);
+        }
+      }
+
       return tasks;
     }
 
