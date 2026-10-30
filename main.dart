@@ -2167,7 +2167,7 @@ void pickSpeed(BuildContext c) {
                 ListTile(
                   title: Text('${v}x'),
                   trailing: store.speed == v
-                      ? const Icon(Icons.check, color: green)
+                      ? Icon(Icons.check, color: green)
                       : null,
                   onTap: () {
                     store.setSpeed(v);
@@ -2666,7 +2666,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
           children: [
             Row(
               children: [
-                const Icon(Icons.queue_music, color: green),
+                Icon(Icons.queue_music, color: green),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
@@ -3106,7 +3106,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                       color: const Color(0xFF2A2A2A),
                       child: ListTile(
                         dense: true,
-                        leading: const Icon(Icons.system_update, color: green),
+                        leading: Icon(Icons.system_update, color: green),
                         title: Text(
                           store.updating
                               ? 'Downloading update…'
@@ -3515,7 +3515,7 @@ class _SearchSheetState extends State<_SearchSheet> {
                     style: const TextStyle(fontSize: 12, color: Colors.white54),
                   ),
                   trailing: done
-                      ? const Icon(Icons.check_circle, color: green)
+                      ? Icon(Icons.check_circle, color: green)
                       : downloading
                       ? SizedBox(
                           width: 48,
@@ -4337,8 +4337,7 @@ class _LyricsSheetState extends State<LyricsSheet> {
                 ? StreamBuilder<Duration>(
                     stream: player.positionStream,
                     builder: (ctx, snap) {
-                      final posMs =
-                          (snap.data?.inMilliseconds ?? 0) + 300;
+                      final posMs = (snap.data?.inMilliseconds ?? 0) + 300;
                       var curIdx = -1;
                       for (var i = 0; i < _lines.length; i++) {
                         if (_lines[i].ms <= posMs) curIdx = i;
@@ -4403,9 +4402,14 @@ class _ThemeTile extends StatelessWidget {
   final Color accentColor;
   final VoidCallback onTap;
   const _ThemeTile({
-    required this.emoji, required this.name, required this.desc,
-    required this.selected, required this.accentColor, required this.onTap,
+    required this.emoji,
+    required this.name,
+    required this.desc,
+    required this.selected,
+    required this.accentColor,
+    required this.onTap,
   });
+
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
@@ -4430,14 +4434,21 @@ class _ThemeTile extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(name, style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    color: selected ? accentColor : swt.onSurface,
-                  )),
+                  Text(
+                    name,
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: selected ? accentColor : swt.onSurface,
+                    ),
+                  ),
                   const SizedBox(height: 2),
-                  Text(desc, style: TextStyle(
-                    fontSize: 12, color: swt.onSurface2,
-                  )),
+                  Text(
+                    desc,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: swt.onSurface2,
+                    ),
+                  ),
                 ],
               ),
             ),
