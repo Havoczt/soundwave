@@ -1066,7 +1066,7 @@ class SoundWaveApp extends StatelessWidget {
               color: t.surface2,
               textStyle: TextStyle(color: t.onSurface),
             ),
-            dialogTheme: DialogThemeData(
+            dialogTheme: DialogTheme(
               backgroundColor: t.surface,
               titleTextStyle: TextStyle(color: t.onSurface, fontSize: 18, fontWeight: FontWeight.w700),
               contentTextStyle: TextStyle(color: t.onSurface2),
@@ -2603,15 +2603,15 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                   'AMOLED black. Frosted cards. Neon violet accents.'),
               ])
                 _ThemeTile(
-                  emoji: entry.\$2,
-                  name: entry.\$3,
-                  desc: entry.\$4,
-                  selected: themeNotifier.current == entry.\$1,
-                  accentColor: entry.\$1 == AppTheme.living
+                  emoji: entry.$2,
+                  name: entry.$3,
+                  desc: entry.$4,
+                  selected: themeNotifier.current == entry.$1,
+                  accentColor: entry.$1 == AppTheme.living
                     ? _livingBase.withAccent(const Color(0xFF1DB954)).accent
-                    : entry.\$1 == AppTheme.retro ? _retroTheme.accent : _glassTheme.accent,
+                    : entry.$1 == AppTheme.retro ? _retroTheme.accent : _glassTheme.accent,
                   onTap: () {
-                    themeNotifier.setTheme(entry.\$1);
+                    themeNotifier.setTheme(entry.$1);
                     Navigator.pop(ctx);
                   },
                 ),
@@ -3454,8 +3454,8 @@ class _SearchSheetState extends State<_SearchSheet> {
           ),
           const SizedBox(height: 8),
           if (_searching)
-            const Padding(
-              padding: EdgeInsets.all(24),
+            Padding(
+              padding: const EdgeInsets.all(24),
               child: CircularProgressIndicator(color: green),
             ),
           if (_searchErr.isNotEmpty)
@@ -3546,7 +3546,7 @@ class _SearchSheetState extends State<_SearchSheet> {
                           ),
                         )
                       : IconButton(
-                          icon: const Icon(
+                          icon: Icon(
                             Icons.download_outlined,
                             color: green,
                           ),
@@ -4074,7 +4074,7 @@ class _LyricsChipState extends State<_LyricsChip> {
   Widget build(BuildContext context) {
     return ActionChip(
       avatar: _fetching
-          ? const SizedBox(
+          ? SizedBox(
               width: 18,
               height: 18,
               child: CircularProgressIndicator(strokeWidth: 2, color: green),
@@ -4162,7 +4162,7 @@ class _BioChipState extends State<_BioChip> {
   Widget build(BuildContext context) {
     return ActionChip(
       avatar: _fetching
-          ? const SizedBox(
+          ? SizedBox(
               width: 18,
               height: 18,
               child: CircularProgressIndicator(strokeWidth: 2, color: green),
@@ -4337,7 +4337,8 @@ class _LyricsSheetState extends State<LyricsSheet> {
                 ? StreamBuilder<Duration>(
                     stream: player.positionStream,
                     builder: (ctx, snap) {
-                      final posMs = (snap.data?.inMilliseconds ?? 0) + 300;
+                      final posMs =
+                          (snap.data?.inMilliseconds ?? 0) + 300;
                       var curIdx = -1;
                       for (var i = 0; i < _lines.length; i++) {
                         if (_lines[i].ms <= posMs) curIdx = i;
@@ -4402,14 +4403,9 @@ class _ThemeTile extends StatelessWidget {
   final Color accentColor;
   final VoidCallback onTap;
   const _ThemeTile({
-    required this.emoji,
-    required this.name,
-    required this.desc,
-    required this.selected,
-    required this.accentColor,
-    required this.onTap,
+    required this.emoji, required this.name, required this.desc,
+    required this.selected, required this.accentColor, required this.onTap,
   });
-
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
@@ -4434,21 +4430,14 @@ class _ThemeTile extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    name,
-                    style: TextStyle(
-                      fontWeight: FontWeight.w700,
-                      color: selected ? accentColor : swt.onSurface,
-                    ),
-                  ),
+                  Text(name, style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: selected ? accentColor : swt.onSurface,
+                  )),
                   const SizedBox(height: 2),
-                  Text(
-                    desc,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: swt.onSurface2,
-                    ),
-                  ),
+                  Text(desc, style: TextStyle(
+                    fontSize: 12, color: swt.onSurface2,
+                  )),
                 ],
               ),
             ),
