@@ -2053,6 +2053,47 @@ class Art extends StatelessWidget {
   }
 }
 
+Future<void> editSongInfo(BuildContext context, Song s) async {
+  final titleCtl = TextEditingController(text: s.title);
+  final artistCtl = TextEditingController(text: s.artist);
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (d) => AlertDialog(
+      title: const Text('Edit info'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: titleCtl,
+            decoration: const InputDecoration(labelText: 'Title'),
+            autofocus: true,
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: artistCtl,
+            decoration: const InputDecoration(labelText: 'Artist'),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(d, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(d, true),
+          child: const Text('Save'),
+        ),
+      ],
+    ),
+  );
+  titleCtl.dispose();
+  artistCtl.dispose();
+  if (confirmed == true) {
+    await store.editSongInfo(s, titleCtl.text, artistCtl.text);
+  }
+}
+
 class Home extends StatefulWidget {
   const Home({super.key});
   @override
@@ -2665,7 +2706,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
               pl.name = n;
               store.touch();
             }
-          } else {
+          } else if (v == 'del') {
             store.lists.remove(pl);
             store.touch();
             setState(() => openPl = null);
@@ -3061,6 +3102,7 @@ class _SearchSheetState extends State<_SearchSheet> {
     if (_dl[r.videoId] != null) return;
     setState(() => _dl[r.videoId] = 0);
     final err = await store.downloadFromInvidious(r, (pct) {
+      if (_dl[r.videoId] == -1) return;
       if (mounted &&
           (_dl[r.videoId] == null ||
               (pct - (_dl[r.videoId] ?? 0)).abs() >= .01)) {
@@ -3142,7 +3184,7 @@ class _SearchSheetState extends State<_SearchSheet> {
             ),
           if (_searchErr.isNotEmpty)
             Padding(
-              padding: const EdgeInsets.all(24),
+              padding: EdgeInsets.all(24),
               child: Text(
                 _searchErr,
                 style: const TextStyle(color: Colors.white54),
@@ -3626,6 +3668,86 @@ class _NowPlayingState extends State<NowPlaying> with TickerProviderStateMixin {
   }
 }
 
+class SeekBar extends StatelessWidget {
+  const SeekBar({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<Duration?>(
+      stream: player.durationStream,
+      builder: (c, ds) {
+        final dur = ds.data ?? Duration.zero;
+        return StreamBuilder<Duration>(
+          stream: player.positionStream,
+          builder: (c, ps) {
+            final pos = ps.data ?? Duration.zero;
+            final mx = dur.inMilliseconds > 0
+                ? dur.inMilliseconds.toDouble()
+                : 1.0;
+            final v = pos.inMilliseconds.toDouble().clamp(0.0, mx).toDouble();
+            return Row(
+              children: [
+                Text(
+                  fmtD(pos),
+                  style: const TextStyle(fontSize: 11, color: Colors.white70),
+                ),
+                Expanded(
+                  child: Slider(
+                    value: v,
+                    max: mx,
+                    activeColor: green,
+                    inactiveColor: Colors.white24,
+                    onChanged: dur.inMilliseconds > 0
+                        ? (x) => player.seek(Duration(milliseconds: x.round()))
+                        : null,
+                  ),
+                ),
+                Text(
+                  fmtD(dur),
+                  style: const TextStyle(fontSize: 11, color: Colors.white70),
+                ),
+                const SizedBox(width: 8),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+void _showLyricLog(BuildContext c, Song s) {
+  showDialog(
+    context: c,
+    builder: (d) => AlertDialog(
+      title: Text('No lyrics for "${s.title}"'),
+      content: SizedBox(
+        width: double.maxFinite,
+        height: 400,
+        child: SingleChildScrollView(
+          child: SelectableText(
+            lyricLog.isEmpty
+                ? '(no log yet)'
+                : lyricLog.reversed.take(60).join('\n'),
+            style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () {
+            lyricLog.clear();
+            Navigator.pop(d);
+          },
+          child: const Text('Clear'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(d),
+          child: const Text('Close'),
+        ),
+      ],
+    ),
+  );
+}
 class _LyricsChip extends StatefulWidget {
   final Song s;
   const _LyricsChip({required this.s});
@@ -3995,85 +4117,4 @@ class _LyricsSheetState extends State<LyricsSheet> {
       ),
     );
   }
-}
-
-class SeekBar extends StatelessWidget {
-  const SeekBar({super.key});
-  @override
-  Widget build(BuildContext context) {
-    return StreamBuilder<Duration?>(
-      stream: player.durationStream,
-      builder: (c, ds) {
-        final dur = ds.data ?? Duration.zero;
-        return StreamBuilder<Duration>(
-          stream: player.positionStream,
-          builder: (c, ps) {
-            final pos = ps.data ?? Duration.zero;
-            final mx = dur.inMilliseconds > 0
-                ? dur.inMilliseconds.toDouble()
-                : 1.0;
-            final v = pos.inMilliseconds.toDouble().clamp(0.0, mx).toDouble();
-            return Row(
-              children: [
-                Text(
-                  fmtD(pos),
-                  style: const TextStyle(fontSize: 11, color: Colors.white70),
-                ),
-                Expanded(
-                  child: Slider(
-                    value: v,
-                    max: mx,
-                    activeColor: green,
-                    inactiveColor: Colors.white24,
-                    onChanged: dur.inMilliseconds > 0
-                        ? (x) => player.seek(Duration(milliseconds: x.round()))
-                        : null,
-                  ),
-                ),
-                Text(
-                  fmtD(dur),
-                  style: const TextStyle(fontSize: 11, color: Colors.white70),
-                ),
-                const SizedBox(width: 8),
-              ],
-            );
-          },
-        );
-      },
-    );
-  }
-}
-
-void _showLyricLog(BuildContext c, Song s) {
-  showDialog(
-    context: c,
-    builder: (d) => AlertDialog(
-      title: Text('No lyrics for "${s.title}"'),
-      content: SizedBox(
-        width: double.maxFinite,
-        height: 400,
-        child: SingleChildScrollView(
-          child: SelectableText(
-            lyricLog.isEmpty
-                ? '(no log yet)'
-                : lyricLog.reversed.take(60).join('\n'),
-            style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
-          ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () {
-            lyricLog.clear();
-            Navigator.pop(d);
-          },
-          child: const Text('Clear'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(d),
-          child: const Text('Close'),
-        ),
-      ],
-    ),
-  );
 }
