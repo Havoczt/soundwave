@@ -19,7 +19,134 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:palette_generator/palette_generator.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
-const green = Color(0xFF1DB954);
+// ── Themes ──────────────────────────────────────────────────────────────────
+
+enum AppTheme { living, retro, glass }
+
+class SWTheme {
+  final String name;
+  final Color accent;
+  final Color bg;
+  final Color surface;
+  final Color surface2;
+  final Color onSurface;
+  final Color onSurface2;
+  final Color navBg;
+  final Color navIndicator;
+  final Gradient? bgGradient;
+  final bool useGrain;          // retro grain overlay
+  final bool useBlur;           // glass blur cards
+  final String fontFamily;
+
+  const SWTheme({
+    required this.name,
+    required this.accent,
+    required this.bg,
+    required this.surface,
+    required this.surface2,
+    required this.onSurface,
+    required this.onSurface2,
+    required this.navBg,
+    required this.navIndicator,
+    this.bgGradient,
+    this.useGrain = false,
+    this.useBlur = false,
+    this.fontFamily = '',
+  });
+
+  // Dynamic — accent injected at runtime from palette
+  SWTheme withAccent(Color c) => SWTheme(
+    name: name, accent: c, bg: bg, surface: surface, surface2: surface2,
+    onSurface: onSurface, onSurface2: onSurface2, navBg: navBg,
+    navIndicator: navIndicator, bgGradient: bgGradient,
+    useGrain: useGrain, useBlur: useBlur, fontFamily: fontFamily,
+  );
+}
+
+// ── Theme definitions ───────────────────────────────────────────────────────
+
+/// 1. Living Color — dynamic palette extracted from album art
+const _livingBase = SWTheme(
+  name: 'Living Color',
+  accent: Color(0xFF1DB954),        // overridden per-song by palette
+  bg: Color(0xFF0A0A0A),
+  surface: Color(0xFF161616),
+  surface2: Color(0xFF222222),
+  onSurface: Color(0xFFFFFFFF),
+  onSurface2: Color(0xFFB3B3B3),
+  navBg: Color(0xFF000000),
+  navIndicator: Color(0xFF1A1A1A),
+);
+
+/// 2. Retro Warmth — vinyl/cassette warmth
+const _retroTheme = SWTheme(
+  name: 'Retro Warmth',
+  accent: Color(0xFFE8A838),        // warm amber
+  bg: Color(0xFF1A1208),
+  surface: Color(0xFF261A0A),
+  surface2: Color(0xFF322210),
+  onSurface: Color(0xFFF5E6C8),
+  onSurface2: Color(0xFFA89070),
+  navBg: Color(0xFF120E06),
+  navIndicator: Color(0xFF3A2C14),
+  useGrain: true,
+  fontFamily: 'monospace',
+);
+
+/// 3. Dark Glass — AMOLED + frosted glass + neon
+const _glassTheme = SWTheme(
+  name: 'Dark Glass',
+  accent: Color(0xFF7B61FF),        // neon violet
+  bg: Color(0xFF000000),
+  surface: Color(0x22FFFFFF),       // semi-transparent white
+  surface2: Color(0x14FFFFFF),
+  onSurface: Color(0xFFFFFFFF),
+  onSurface2: Color(0x99FFFFFF),
+  navBg: Color(0xCC000000),
+  navIndicator: Color(0x33FFFFFF),
+  useBlur: true,
+);
+
+// ── ThemeNotifier ───────────────────────────────────────────────────────────
+
+class ThemeNotifier extends ChangeNotifier {
+  AppTheme _current = AppTheme.living;
+  Color _dynamicAccent = const Color(0xFF1DB954);
+
+  AppTheme get current => _current;
+
+  SWTheme get theme {
+    switch (_current) {
+      case AppTheme.living:
+        return _livingBase.withAccent(_dynamicAccent);
+      case AppTheme.retro:
+        return _retroTheme;
+      case AppTheme.glass:
+        return _glassTheme;
+    }
+  }
+
+  void setTheme(AppTheme t) {
+    _current = t;
+    notifyListeners();
+  }
+
+  void setDynamicAccent(Color c) {
+    if (_current == AppTheme.living) {
+      _dynamicAccent = c;
+      notifyListeners();
+    }
+  }
+}
+
+final themeNotifier = ThemeNotifier();
+
+// shorthand used throughout UI
+SWTheme get swt => themeNotifier.theme;
+
+// legacy alias so existing `green` references keep compiling
+Color get green => swt.accent;
+
 const _exts = {
   '.mp3',
   '.m4a',
@@ -866,27 +993,110 @@ Future<void> main() async {
 class SoundWaveApp extends StatelessWidget {
   const SoundWaveApp({super.key});
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    title: 'SoundWave',
-    debugShowCheckedModeBanner: false,
-    theme: ThemeData(
-      useMaterial3: true,
-      brightness: Brightness.dark,
-      colorScheme: const ColorScheme.dark(primary: green),
-      scaffoldBackgroundColor: const Color(0xFF121212),
-      navigationBarTheme: NavigationBarThemeData(
-        backgroundColor: const Color(0xFF000000),
-        indicatorColor: const Color(0xFF2A2A2A),
-        labelTextStyle: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.selected)) {
-            return const TextStyle(color: green, fontWeight: FontWeight.bold, fontSize: 12);
-          }
-          return const TextStyle(color: Colors.white70, fontSize: 12);
-        }),
-      ),
-    ),
-    home: const Home(),
-  );
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: themeNotifier,
+      builder: (context, _) {
+        final t = themeNotifier.theme;
+        return MaterialApp(
+          title: 'SoundWave',
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            useMaterial3: true,
+            brightness: Brightness.dark,
+            fontFamily: t.fontFamily.isEmpty ? null : t.fontFamily,
+            colorScheme: ColorScheme.dark(
+              primary: t.accent,
+              surface: t.surface,
+              onSurface: t.onSurface,
+            ),
+            scaffoldBackgroundColor: t.bg,
+            cardColor: t.surface,
+            dividerColor: t.onSurface.withOpacity(0.08),
+            sliderTheme: SliderThemeData(
+              activeTrackColor: t.accent,
+              thumbColor: t.accent,
+              inactiveTrackColor: t.onSurface.withOpacity(0.15),
+              overlayColor: t.accent.withOpacity(0.12),
+              trackHeight: 3,
+            ),
+            chipTheme: ChipThemeData(
+              backgroundColor: t.surface2,
+              labelStyle: TextStyle(color: t.onSurface, fontSize: 12),
+              side: BorderSide(color: t.onSurface.withOpacity(0.1)),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+            ),
+            iconTheme: IconThemeData(color: t.onSurface2),
+            textTheme: TextTheme(
+              bodyMedium: TextStyle(color: t.onSurface2),
+              bodySmall: TextStyle(color: t.onSurface2),
+            ),
+            navigationBarTheme: NavigationBarThemeData(
+              backgroundColor: t.navBg,
+              indicatorColor: t.navIndicator,
+              labelTextStyle: WidgetStateProperty.resolveWith((states) {
+                if (states.contains(WidgetState.selected)) {
+                  return TextStyle(color: t.accent, fontWeight: FontWeight.bold, fontSize: 12);
+                }
+                return TextStyle(color: t.onSurface2, fontSize: 12);
+              }),
+              iconTheme: WidgetStateProperty.resolveWith((states) {
+                if (states.contains(WidgetState.selected)) {
+                  return IconThemeData(color: t.accent);
+                }
+                return IconThemeData(color: t.onSurface2);
+              }),
+            ),
+            appBarTheme: AppBarTheme(
+              backgroundColor: Colors.transparent,
+              foregroundColor: t.onSurface,
+              elevation: 0,
+            ),
+            inputDecorationTheme: InputDecorationTheme(
+              filled: true,
+              fillColor: t.surface2,
+              hintStyle: TextStyle(color: t.onSurface2),
+              prefixIconColor: t.onSurface2,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(30),
+                borderSide: BorderSide.none,
+              ),
+            ),
+            popupMenuTheme: PopupMenuThemeData(
+              color: t.surface2,
+              textStyle: TextStyle(color: t.onSurface),
+            ),
+            dialogTheme: DialogThemeData(
+              backgroundColor: t.surface,
+              titleTextStyle: TextStyle(color: t.onSurface, fontSize: 18, fontWeight: FontWeight.w700),
+              contentTextStyle: TextStyle(color: t.onSurface2),
+            ),
+            bottomSheetTheme: BottomSheetThemeData(
+              backgroundColor: t.bg,
+              modalBackgroundColor: t.bg,
+            ),
+            listTileTheme: ListTileThemeData(
+              tileColor: Colors.transparent,
+              textColor: t.onSurface,
+              iconColor: t.onSurface2,
+            ),
+            progressIndicatorTheme: ProgressIndicatorThemeData(
+              color: t.accent,
+              linearTrackColor: t.onSurface.withOpacity(0.1),
+            ),
+            filledButtonTheme: FilledButtonThemeData(
+              style: FilledButton.styleFrom(
+                backgroundColor: t.accent,
+                foregroundColor: t.bg,
+                textStyle: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ),
+          home: const Home(),
+        );
+      },
+    );
+  }
 }
 
 class Song {
@@ -2337,6 +2547,8 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
         _run(store.reenrichAll());
       } else if (v == 'batch') {
         _openBatchImport();
+      } else if (v == 'theme') {
+        _openThemePicker();
       }
     },
     itemBuilder: (_) => const [
@@ -2348,6 +2560,67 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
       PopupMenuItem(value: 'enrich', child: Text('Refresh lyrics & artist')),
     ],
   );
+
+  void _openThemePicker() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: swt.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => ListenableBuilder(
+        listenable: themeNotifier,
+        builder: (ctx, __) => Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40, height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text('Choose theme', style: TextStyle(
+                fontSize: 20, fontWeight: FontWeight.w800,
+                color: swt.onSurface,
+              )),
+              const SizedBox(height: 4),
+              Text('Affects colors, surfaces, and feel across the whole app',
+                style: TextStyle(color: swt.onSurface2, fontSize: 13)),
+              const SizedBox(height: 16),
+              for (final entry in [
+                (AppTheme.living, '🎨', 'Living Color',
+                  'Dynamic — shifts with your album art. Every song paints the app.'),
+                (AppTheme.retro,  '🎷', 'Retro Warmth',
+                  'Vinyl vibes. Warm ambers, grain texture, analog feel.'),
+                (AppTheme.glass,  '✦',  'Dark Glass',
+                  'AMOLED black. Frosted cards. Neon violet accents.'),
+              ])
+                _ThemeTile(
+                  emoji: entry.\$2,
+                  name: entry.\$3,
+                  desc: entry.\$4,
+                  selected: themeNotifier.current == entry.\$1,
+                  accentColor: entry.\$1 == AppTheme.living
+                    ? _livingBase.withAccent(const Color(0xFF1DB954)).accent
+                    : entry.\$1 == AppTheme.retro ? _retroTheme.accent : _glassTheme.accent,
+                  onTap: () {
+                    themeNotifier.setTheme(entry.\$1);
+                    Navigator.pop(ctx);
+                  },
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   void _openBatchImport() {
     showModalBottomSheet(
@@ -2813,15 +3086,18 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
               child: Column(
                 children: [
                   if (store.busy != null)
-                    Container(
-                      width: double.infinity,
-                      color: green,
-                      padding: const EdgeInsets.all(8),
-                      child: Text(
-                        store.busy!,
-                        style: const TextStyle(
-                          color: Colors.black,
-                          fontWeight: FontWeight.w600,
+                    ListenableBuilder(
+                      listenable: themeNotifier,
+                      builder: (_, __) => Container(
+                        width: double.infinity,
+                        color: swt.accent,
+                        padding: const EdgeInsets.all(8),
+                        child: Text(
+                          store.busy!,
+                          style: TextStyle(
+                            color: swt.bg,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
                     ),
@@ -3448,6 +3724,7 @@ class _NowPlayingState extends State<NowPlaying> with TickerProviderStateMixin {
           pg.dominantColor?.color;
       if (color != null && mounted) {
         setState(() => _paletteCache[s.id] = color);
+        themeNotifier.setDynamicAccent(color);
       }
     } catch (_) {}
   }
@@ -4114,6 +4391,60 @@ class _LyricsSheetState extends State<LyricsSheet> {
                   ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ── Theme tile used in picker ────────────────────────────────────────────────
+class _ThemeTile extends StatelessWidget {
+  final String emoji, name, desc;
+  final bool selected;
+  final Color accentColor;
+  final VoidCallback onTap;
+  const _ThemeTile({
+    required this.emoji, required this.name, required this.desc,
+    required this.selected, required this.accentColor, required this.onTap,
+  });
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: selected ? accentColor.withOpacity(0.15) : swt.surface2,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: selected ? accentColor : Colors.white12,
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            Text(emoji, style: const TextStyle(fontSize: 24)),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(name, style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: selected ? accentColor : swt.onSurface,
+                  )),
+                  const SizedBox(height: 2),
+                  Text(desc, style: TextStyle(
+                    fontSize: 12, color: swt.onSurface2,
+                  )),
+                ],
+              ),
+            ),
+            if (selected)
+              Icon(Icons.check_circle, color: accentColor, size: 20),
+          ],
+        ),
       ),
     );
   }
