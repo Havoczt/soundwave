@@ -1610,25 +1610,40 @@ class Store extends ChangeNotifier {
     return left.split(RegExp(r'\s+')).length <= 6 ? '$left $right' : value;
   }
 
+  String _cleanPlaylistUrl(String input) {
+    // Extract just the list= ID and rebuild a clean URL (strip si=, index, etc.)
+    final m = RegExp(r'[?&]list=([a-zA-Z0-9_-]+)').firstMatch(input);
+    if (m != null) {
+      return 'https://www.youtube.com/playlist?list=${m.group(1)}';
+    }
+    return input.trim();
+  }
+
   Future<List<BatchDownloadTask>> _parseBatchInput(String input) async {
     final value = input.trim();
     if (value.isEmpty) return [];
 
     if (_isPlaylistInput(value)) {
+      final cleanUrl = _cleanPlaylistUrl(value);
       final tasks = <BatchDownloadTask>[];
       var index = 0;
-      await for (final video in _yt.playlists.getVideos(value).take(200)) {
-        final result = InvResult(
-          videoId: video.id.value,
-          title: video.title,
-          author: video.author,
-          thumbnail: video.thumbnails.highResUrl,
-          lengthSeconds: video.duration?.inSeconds ?? 0,
-        );
-        final task = BatchDownloadTask('playlist-$index', video.title)
-          ..result = result;
-        tasks.add(task);
-        index++;
+      try {
+        await for (final video in _yt.playlists.getVideos(cleanUrl).take(200)) {
+          final result = InvResult(
+            videoId: video.id.value,
+            title: video.title,
+            author: video.author,
+            thumbnail: video.thumbnails.highResUrl,
+            lengthSeconds: video.duration?.inSeconds ?? 0,
+          );
+          final task = BatchDownloadTask('playlist-$index', video.title)
+            ..result = result;
+          tasks.add(task);
+          index++;
+        }
+      } catch (e) {
+        debugPrint('[batch] playlist parse failed: $e');
+        rethrow;
       }
       return tasks;
     }
@@ -1670,7 +1685,7 @@ class Store extends ChangeNotifier {
     }
     if (tasks.isEmpty) {
       return _isPlaylistInput(input) || _isSpotifyPlaylist(input)
-          ? 'Playlist has no downloadable tracks'
+          ? 'Playlist has no downloadable tracks (private, empty, or blocked?)'
           : 'No songs found in the list';
     }
     if (!batchRunning && batchQueue.every((task) => task.finished)) {
@@ -2264,8 +2279,11 @@ class Art extends StatelessWidget {
 }
 
 Future<void> editSongInfo(BuildContext context, Song s) async {
+  // Pre-fill, but leave "Unknown artist" blank so user can type immediately
   final titleCtl = TextEditingController(text: s.title);
-  final artistCtl = TextEditingController(text: s.artist);
+  final artistCtl = TextEditingController(
+    text: s.artist == 'Unknown artist' ? '' : s.artist,
+  );
   final confirmed = await showDialog<bool>(
     context: context,
     builder: (d) => AlertDialog(
@@ -2277,11 +2295,16 @@ Future<void> editSongInfo(BuildContext context, Song s) async {
             controller: titleCtl,
             decoration: const InputDecoration(labelText: 'Title'),
             autofocus: true,
+            textCapitalization: TextCapitalization.words,
           ),
           const SizedBox(height: 12),
           TextField(
             controller: artistCtl,
-            decoration: const InputDecoration(labelText: 'Artist'),
+            decoration: const InputDecoration(
+              labelText: 'Artist',
+              hintText: 'Artist name',
+            ),
+            textCapitalization: TextCapitalization.words,
           ),
         ],
       ),
@@ -2297,10 +2320,12 @@ Future<void> editSongInfo(BuildContext context, Song s) async {
       ],
     ),
   );
+  final newTitle = titleCtl.text;
+  final newArtist = artistCtl.text;
   titleCtl.dispose();
   artistCtl.dispose();
   if (confirmed == true) {
-    await store.editSongInfo(s, titleCtl.text, artistCtl.text);
+    await store.editSongInfo(s, newTitle, newArtist);
   }
 }
 
