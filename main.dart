@@ -68,27 +68,27 @@ class SWTheme {
 /// 1. Living Color — dynamic palette extracted from album art
 const _livingBase = SWTheme(
   name: 'Living Color',
-  accent: Color(0xFF1ED760),        // Spotify-leaning green, overridden by palette
-  bg: Color(0xFF121212),
-  surface: Color(0xFF181818),
-  surface2: Color(0xFF282828),
-  onSurface: Color(0xFFFFFFFF),
-  onSurface2: Color(0xFFB3B3B3),
-  navBg: Color(0xFF000000),
-  navIndicator: Color(0xFF282828),
+  accent: Color(0xFF1DF284),
+  bg: Color(0xFF0A0C10),
+  surface: Color(0xFF14171F),
+  surface2: Color(0xFF202531),
+  onSurface: Color(0xFFF8FAFC),
+  onSurface2: Color(0xFF94A3B8),
+  navBg: Color(0xFF07080B),
+  navIndicator: Color(0xFF242B38),
 );
 
 /// 2. Retro Warmth — vinyl/cassette warmth
 const _retroTheme = SWTheme(
   name: 'Retro Warmth',
-  accent: Color(0xFFE8A838),        // warm amber
-  bg: Color(0xFF1A1208),
-  surface: Color(0xFF261A0A),
-  surface2: Color(0xFF322210),
-  onSurface: Color(0xFFF5E6C8),
-  onSurface2: Color(0xFFA89070),
-  navBg: Color(0xFF120E06),
-  navIndicator: Color(0xFF3A2C14),
+  accent: Color(0xFFE59830),
+  bg: Color(0xFF16110B),
+  surface: Color(0xFF241B12),
+  surface2: Color(0xFF35271A),
+  onSurface: Color(0xFFF7ECDA),
+  onSurface2: Color(0xFFA8947D),
+  navBg: Color(0xFF0F0C08),
+  navIndicator: Color(0xFF423120),
   useGrain: true,
   fontFamily: 'monospace',
 );
@@ -96,14 +96,14 @@ const _retroTheme = SWTheme(
 /// 3. Dark Glass — AMOLED + frosted glass + neon
 const _glassTheme = SWTheme(
   name: 'Dark Glass',
-  accent: Color(0xFF7B61FF),        // neon violet
+  accent: Color(0xFF00F0FF),
   bg: Color(0xFF000000),
-  surface: Color(0x22FFFFFF),       // semi-transparent white
-  surface2: Color(0x14FFFFFF),
+  surface: Color(0x1FFFFFFF),
+  surface2: Color(0x33FFFFFF),
   onSurface: Color(0xFFFFFFFF),
-  onSurface2: Color(0x99FFFFFF),
-  navBg: Color(0xCC000000),
-  navIndicator: Color(0x33FFFFFF),
+  onSurface2: Color(0xA6FFFFFF),
+  navBg: Color(0xB3000000),
+  navIndicator: Color(0x3DFFFFFF),
   useBlur: true,
 );
 
