@@ -1026,6 +1026,7 @@ Future<void> main() async {
   });
 
   await store.load();
+  player.currentIndexStream.listen(_onSongChange);
   runApp(const SoundWaveApp());
 }
 
@@ -4480,17 +4481,20 @@ class LyricsSheet extends StatefulWidget {
 }
 
 class _LyricsSheetState extends State<LyricsSheet> {
-  late final ScrollController _sc;
+  final ScrollController _sc = ScrollController();
   late final List<({int ms, String line})> _lines;
   late final bool _isSynced;
-  static const double _lineHeight = 52.0;
+  final _keys = <int, GlobalKey>{};
+  int _lastIdx = -1;
 
   @override
   void initState() {
     super.initState();
-    _sc = ScrollController();
     _isSynced = widget.s.syncedLyrics != null;
     _lines = _isSynced ? parseLrc(widget.s.syncedLyrics!) : [];
+    for (var i = 0; i < _lines.length; i++) {
+      _keys[i] = GlobalKey();
+    }
   }
 
   @override
@@ -4500,30 +4504,37 @@ class _LyricsSheetState extends State<LyricsSheet> {
   }
 
   void _scrollToLine(int idx) {
-    if (!_sc.hasClients) return;
-    final offset = idx * _lineHeight;
-    final viewportHeight = _sc.position.viewportDimension;
-    final target = offset - viewportHeight / 2 + _lineHeight / 2;
+    if (!_sc.hasClients || idx == _lastIdx) return;
+    _lastIdx = idx;
+    final key = _keys[idx];
+    if (key?.currentContext == null) return;
+    final box = key!.currentContext!.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final itemOffset = box.localToGlobal(Offset.zero).dy;
+    final viewport = _sc.position.viewportDimension;
+    final current = _sc.offset;
+    final itemH = box.size.height;
+    final target = current + itemOffset - viewport / 2 + itemH / 2;
     _sc.animateTo(
       target.clamp(0.0, _sc.position.maxScrollExtent),
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOut,
+      duration: const Duration(milliseconds: 400),
+      curve: Curves.easeInOutCubic,
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final accent = swt.accent;
     return DraggableScrollableSheet(
       expand: false,
       initialChildSize: 0.6,
       maxChildSize: 0.92,
       minChildSize: 0.3,
-      builder: (_, sheetSc) => Column(
+      builder: (_, __) => Column(
         children: [
           const SizedBox(height: 12),
           Container(
-            width: 40,
-            height: 4,
+            width: 40, height: 4,
             decoration: BoxDecoration(
               color: Colors.white24,
               borderRadius: BorderRadius.circular(2),
@@ -4542,74 +4553,103 @@ class _LyricsSheetState extends State<LyricsSheet> {
               ],
             ),
           ),
-          Text(
-            widget.s.title,
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-          ),
-          Text(
-            widget.s.artist,
-            style: const TextStyle(color: Colors.white54, fontSize: 13),
-          ),
+          Text(widget.s.title,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          Text(widget.s.artist,
+            style: const TextStyle(color: Colors.white54, fontSize: 13)),
           const Divider(height: 24, color: Colors.white12),
           Expanded(
             child: _isSynced
-                ? StreamBuilder<Duration>(
-                    stream: player.positionStream,
-                    builder: (ctx, snap) {
-                      final posMs =
-                          (snap.data?.inMilliseconds ?? 0) + 300;
-                      var curIdx = -1;
-                      for (var i = 0; i < _lines.length; i++) {
-                        if (_lines[i].ms <= posMs) curIdx = i;
-                      }
-                      if (curIdx >= 0) {
-                        WidgetsBinding.instance.addPostFrameCallback(
-                          (_) => _scrollToLine(curIdx),
-                        );
-                      }
-                      return ListView.builder(
-                        controller: _sc,
-                        padding: const EdgeInsets.fromLTRB(24, 0, 24, 32),
-                        itemCount: _lines.length,
-                        itemBuilder: (c, i) {
-                          final isCur = i == curIdx;
-                          return ConstrainedBox(
-                            constraints: const BoxConstraints(
-                              minHeight: _lineHeight,
-                            ),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 6),
-                              child: Text(
-                                _lines[i].line,
-                                style: TextStyle(
-                                  fontSize: isCur ? 17 : 15,
-                                  fontWeight: isCur
-                                      ? FontWeight.bold
-                                      : FontWeight.normal,
-                                  color: isCur ? Colors.white : Colors.white54,
-                                  height: 1.4,
-                                ),
-                              ),
-                            ),
-                          );
-                        },
+              ? StreamBuilder<Duration>(
+                  stream: player.positionStream,
+                  builder: (ctx, snap) {
+                    final posMs = (snap.data?.inMilliseconds ?? 0) + 300;
+                    var curIdx = -1;
+                    for (var i = 0; i < _lines.length; i++) {
+                      if (_lines[i].ms <= posMs) curIdx = i;
+                    }
+                    if (curIdx >= 0) {
+                      WidgetsBinding.instance.addPostFrameCallback(
+                        (_) => _scrollToLine(curIdx),
                       );
-                    },
-                  )
-                : SingleChildScrollView(
-                    controller: _sc,
-                    padding: const EdgeInsets.fromLTRB(24, 0, 24, 32),
-                    child: Text(
-                      widget.s.lyrics ?? '',
-                      style: const TextStyle(
-                        fontSize: 15,
-                        height: 1.8,
-                        color: Colors.white70,
-                      ),
+                    }
+                    return ListView.builder(
+                      controller: _sc,
+                      padding: const EdgeInsets.fromLTRB(24, 40, 24, 120),
+                      itemCount: _lines.length,
+                      itemBuilder: (c, i) {
+                        final isCur = i == curIdx;
+                        final isNear = (i - curIdx).abs() <= 1;
+                        return _LyricLine(
+                          key: _keys[i],
+                          text: _lines[i].line,
+                          isCurrent: isCur,
+                          isNear: isNear,
+                          accent: accent,
+                        );
+                      },
+                    );
+                  },
+                )
+              : SingleChildScrollView(
+                  controller: _sc,
+                  padding: const EdgeInsets.fromLTRB(24, 0, 24, 32),
+                  child: Text(
+                    widget.s.lyrics ?? '',
+                    style: TextStyle(
+                      fontSize: 15, height: 1.9,
+                      color: swt.onSurface.withOpacity(0.75),
                     ),
                   ),
+                ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _LyricLine extends StatelessWidget {
+  final String text;
+  final bool isCurrent, isNear;
+  final Color accent;
+  const _LyricLine({
+    super.key,
+    required this.text,
+    required this.isCurrent,
+    required this.isNear,
+    required this.accent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final fontSize = isCurrent ? 22.0 : isNear ? 16.0 : 14.0;
+    final color = isCurrent
+        ? accent
+        : isNear
+            ? Colors.white.withOpacity(0.55)
+            : Colors.white.withOpacity(0.22);
+    final weight = isCurrent ? FontWeight.w800 : FontWeight.w500;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 350),
+      curve: Curves.easeOutCubic,
+      padding: EdgeInsets.symmetric(
+        vertical: isCurrent ? 14 : isNear ? 9 : 6,
+      ),
+      child: AnimatedDefaultTextStyle(
+        duration: const Duration(milliseconds: 350),
+        curve: Curves.easeOutCubic,
+        style: TextStyle(
+          fontSize: fontSize,
+          fontWeight: weight,
+          color: color,
+          height: 1.35,
+          shadows: isCurrent
+              ? [Shadow(color: accent.withOpacity(0.5), blurRadius: 12)]
+              : null,
+        ),
+        child: Text(text),
       ),
     );
   }
