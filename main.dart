@@ -19,6 +19,37 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:palette_generator/palette_generator.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
+
+// ── Animated bottom sheet helper ────────────────────────────────────────────
+Future<T?> _showSheet<T>(
+  BuildContext context, {
+  required WidgetBuilder builder,
+  bool isScrollControlled = false,
+  Color? backgroundColor,
+  ShapeBorder? shape,
+  bool useSafeArea = false,
+  bool isDismissible = true,
+  bool enableDrag = true,
+}) {
+  final ctrl = AnimationController(
+    vsync: Navigator.of(context),
+    duration: const Duration(milliseconds: 340),
+  );
+  return showModalBottomSheet<T>(
+    context: context,
+    isScrollControlled: isScrollControlled,
+    backgroundColor: backgroundColor ?? swt.bg,
+    useSafeArea: useSafeArea,
+    isDismissible: isDismissible,
+    enableDrag: enableDrag,
+    shape: shape ?? const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+    ),
+    transitionAnimationController: ctrl,
+    builder: builder,
+  );
+}
+
 // ── Themes ──────────────────────────────────────────────────────────────────
 
 enum AppTheme { living, retro, glass }
@@ -2157,7 +2188,7 @@ Future<String?> askName(BuildContext c, String title, [String init = '']) {
 }
 
 void addToPlaylist(BuildContext c, Song s) {
-  showModalBottomSheet(
+  _showSheet(
     context: c,
     backgroundColor: const Color(0xFF1E1E1E),
     shape: const RoundedRectangleBorder(
@@ -2210,7 +2241,7 @@ void addToPlaylist(BuildContext c, Song s) {
 }
 
 void pickSpeed(BuildContext c) {
-  showModalBottomSheet(
+  _showSheet(
     context: c,
     backgroundColor: const Color(0xFF1E1E1E),
     shape: const RoundedRectangleBorder(
@@ -2252,7 +2283,7 @@ void pickSpeed(BuildContext c) {
 }
 
 void pickSleep(BuildContext c) {
-  showModalBottomSheet(
+  _showSheet(
     context: c,
     backgroundColor: const Color(0xFF1E1E1E),
     shape: const RoundedRectangleBorder(
@@ -2655,7 +2686,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
   );
 
   void _openThemePicker() {
-    showModalBottomSheet(
+    _showSheet(
       context: context,
       backgroundColor: swt.surface,
       shape: const RoundedRectangleBorder(
@@ -2716,7 +2747,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
   }
 
   void _openBatchImport() {
-    showModalBottomSheet(
+    _showSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: const Color(0xFF1E1E1E),
@@ -2728,7 +2759,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
   }
 
   void _openSearch() {
-    showModalBottomSheet(
+    _showSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: const Color(0xFF1E1E1E),
@@ -3951,9 +3982,10 @@ class _NowPlayingState extends State<NowPlaying> with TickerProviderStateMixin {
     super.initState();
     _pulseController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1200),
+      duration: const Duration(milliseconds: 2000),
     )..repeat(reverse: true);
-    _pulseAnimation = Tween<double>(begin: 0.96, end: 1.0).animate(
+    // Very subtle — only drives shadow opacity, no scale
+    _pulseAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
   }
@@ -4047,8 +4079,24 @@ class _NowPlayingState extends State<NowPlaying> with TickerProviderStateMixin {
                                 } else {
                                   if (_pulseController.isAnimating) _pulseController.stop();
                                 }
-                                return ScaleTransition(
-                                  scale: isPlaying ? _pulseAnimation : const AlwaysStoppedAnimation(1.0),
+                                // Shadow breathes with _pulseAnimation, no scale zoom
+                                return AnimatedBuilder(
+                                  animation: _pulseAnimation,
+                                  builder: (context, child) {
+                                    return DecoratedBox(
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(16),
+                                        boxShadow: isPlaying ? [
+                                          BoxShadow(
+                                            color: swt.accent.withOpacity(0.15 + _pulseAnimation.value * 0.20),
+                                            blurRadius: 16 + _pulseAnimation.value * 20,
+                                            spreadRadius: _pulseAnimation.value * 4,
+                                          ),
+                                        ] : [],
+                                      ),
+                                      child: child,
+                                    );
+                                  },
                                   child: AnimatedSwitcher(
                                     duration: const Duration(milliseconds: 500),
                                     transitionBuilder: (child, anim) => FadeTransition(
@@ -4060,19 +4108,11 @@ class _NowPlayingState extends State<NowPlaying> with TickerProviderStateMixin {
                                         child: child,
                                       ),
                                     ),
-                                    child: Container(
+                                    child: Art(
+                                      s, dimension,
                                       key: ValueKey(s.id),
-                                      decoration: BoxDecoration(
-                                        borderRadius: BorderRadius.circular(16),
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color: Colors.black.withOpacity(0.45),
-                                            blurRadius: 24,
-                                            offset: const Offset(0, 10),
-                                          ),
-                                        ],
-                                      ),
-                                      child: Art(s, dimension, radius: 16, useHero: true),
+                                      radius: 16,
+                                      useHero: true,
                                     ),
                                   ),
                                 );
@@ -4373,7 +4413,7 @@ class _LyricsChipState extends State<_LyricsChip> {
   }
 
   void _open(Song s) {
-    showModalBottomSheet(
+    _showSheet(
       context: context,
       isScrollControlled: true,
       isDismissible: false,
@@ -4463,7 +4503,7 @@ class _BioChipState extends State<_BioChip> {
       );
       return;
     }
-    showModalBottomSheet(
+    _showSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: const Color(0xFF1E1E1E),
