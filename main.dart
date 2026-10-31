@@ -2454,12 +2454,22 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
               fmtD(Duration(milliseconds: s.dur)),
               style: const TextStyle(color: Colors.white54, fontSize: 12),
             ),
-          IconButton(
-            icon: Icon(
-              lk ? Icons.favorite : Icons.favorite_border,
-              color: lk ? green : Colors.white54,
+          AnimatedScale(
+            scale: lk ? 1.2 : 1.0,
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOutBack,
+            child: IconButton(
+              icon: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 180),
+                transitionBuilder: (child, anim) => ScaleTransition(scale: anim, child: child),
+                child: Icon(
+                  lk ? Icons.favorite : Icons.favorite_border,
+                  key: ValueKey(lk),
+                  color: lk ? green : Colors.white54,
+                ),
+              ),
+              onPressed: () => store.like(s.id),
             ),
-            onPressed: () => store.like(s.id),
           ),
           PopupMenuButton<String>(
             onSelected: (v) async {
@@ -3829,27 +3839,41 @@ class MiniPlayer extends StatelessWidget {
                             ),
                             const SizedBox(width: 12),
                             Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    s.title,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                    ),
+                              child: AnimatedSwitcher(
+                                duration: const Duration(milliseconds: 300),
+                                transitionBuilder: (child, anim) => FadeTransition(
+                                  opacity: anim,
+                                  child: SlideTransition(
+                                    position: Tween<Offset>(
+                                      begin: const Offset(0.05, 0),
+                                      end: Offset.zero,
+                                    ).animate(CurvedAnimation(parent: anim, curve: Curves.easeOut)),
+                                    child: child,
                                   ),
-                                  Text(
-                                    s.artist,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      color: Colors.white70,
-                                      fontSize: 12,
+                                ),
+                                child: Column(
+                                  key: ValueKey(s.id),
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      s.title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                      ),
                                     ),
-                                  ),
-                                ],
+                                    Text(
+                                      s.artist,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                           ],
@@ -3876,7 +3900,19 @@ class MiniPlayer extends StatelessWidget {
                             backgroundColor: Colors.white,
                             foregroundColor: Colors.black,
                           ),
-                          icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                          icon: AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 160),
+                            transitionBuilder: (child, anim) => ScaleTransition(
+                              scale: Tween<double>(begin: 0.5, end: 1.0).animate(
+                                CurvedAnimation(parent: anim, curve: Curves.easeOutBack),
+                              ),
+                              child: child,
+                            ),
+                            child: Icon(
+                              playing ? Icons.pause : Icons.play_arrow,
+                              key: ValueKey(playing),
+                            ),
+                          ),
                           onPressed: () =>
                               playing ? player.pause() : player.play(),
                         );
@@ -3968,12 +4004,14 @@ class _NowPlayingState extends State<NowPlaying> with TickerProviderStateMixin {
           final lk = store.liked.contains(s.id);
           final sleep = store.sleepAt;
           final bgColor = _paletteCache[s.id] ?? _col(s.title);
-          return Container(
+          return AnimatedContainer(
+            duration: const Duration(milliseconds: 800),
+            curve: Curves.easeInOut,
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
-                colors: [bgColor, const Color(0xFF121212)],
+                colors: [bgColor, swt.bg],
                 stops: const [0, .7],
               ),
             ),
@@ -4011,18 +4049,31 @@ class _NowPlayingState extends State<NowPlaying> with TickerProviderStateMixin {
                                 }
                                 return ScaleTransition(
                                   scale: isPlaying ? _pulseAnimation : const AlwaysStoppedAnimation(1.0),
-                                  child: Container(
-                                    decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(16),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: Colors.black.withOpacity(0.4),
-                                          blurRadius: 16,
-                                          offset: const Offset(0, 8),
+                                  child: AnimatedSwitcher(
+                                    duration: const Duration(milliseconds: 500),
+                                    transitionBuilder: (child, anim) => FadeTransition(
+                                      opacity: anim,
+                                      child: ScaleTransition(
+                                        scale: Tween<double>(begin: 0.88, end: 1.0).animate(
+                                          CurvedAnimation(parent: anim, curve: Curves.easeOutBack),
                                         ),
-                                      ],
+                                        child: child,
+                                      ),
                                     ),
-                                    child: Art(s, dimension, radius: 16, useHero: true),
+                                    child: Container(
+                                      key: ValueKey(s.id),
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(16),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.black.withOpacity(0.45),
+                                            blurRadius: 24,
+                                            offset: const Offset(0, 10),
+                                          ),
+                                        ],
+                                      ),
+                                      child: Art(s, dimension, radius: 16, useHero: true),
+                                    ),
                                   ),
                                 );
                               },
@@ -4035,38 +4086,62 @@ class _NowPlayingState extends State<NowPlaying> with TickerProviderStateMixin {
                     Row(
                       children: [
                         Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                s.title,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 24,
-                                  fontWeight: FontWeight.w800,
-                                ),
+                          child: AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 350),
+                            transitionBuilder: (child, anim) => FadeTransition(
+                              opacity: anim,
+                              child: SlideTransition(
+                                position: Tween<Offset>(
+                                  begin: const Offset(0.06, 0),
+                                  end: Offset.zero,
+                                ).animate(CurvedAnimation(parent: anim, curve: Curves.easeOutCubic)),
+                                child: child,
                               ),
-                              const SizedBox(height: 4),
-                              Text(
-                                s.artist,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  color: Colors.white70,
+                            ),
+                            child: Column(
+                              key: ValueKey(s.id),
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  s.title,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 24,
+                                    fontWeight: FontWeight.w800,
+                                  ),
                                 ),
-                              ),
-                            ],
+                                const SizedBox(height: 4),
+                                Text(
+                                  s.artist,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 16,
+                                    color: Colors.white70,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
-                        IconButton(
-                          iconSize: 32,
-                          icon: Icon(
-                            lk ? Icons.favorite : Icons.favorite_border,
-                            color: lk ? green : Colors.white,
+                        AnimatedScale(
+                          scale: lk ? 1.15 : 1.0,
+                          duration: const Duration(milliseconds: 200),
+                          curve: Curves.easeOutBack,
+                          child: IconButton(
+                            iconSize: 32,
+                            icon: AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 200),
+                              transitionBuilder: (child, anim) => ScaleTransition(scale: anim, child: child),
+                              child: Icon(
+                                lk ? Icons.favorite : Icons.favorite_border,
+                                key: ValueKey(lk),
+                                color: lk ? green : Colors.white,
+                              ),
+                            ),
+                            onPressed: () => store.like(s.id),
                           ),
-                          onPressed: () => store.like(s.id),
                         ),
                       ],
                     ),
@@ -4092,20 +4167,41 @@ class _NowPlayingState extends State<NowPlaying> with TickerProviderStateMixin {
                           stream: player.playerStateStream,
                           builder: (c, st) {
                             final playing = st.data?.playing ?? false;
-                            return Material(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(32),
-                              child: InkWell(
-                                borderRadius: BorderRadius.circular(32),
-                                onTap: () => playing ? player.pause() : player.play(),
-                                child: Container(
-                                  width: 64,
-                                  height: 64,
-                                  alignment: Alignment.center,
-                                  child: Icon(
-                                    playing ? Icons.pause : Icons.play_arrow,
-                                    size: 36,
-                                    color: Colors.black,
+                            return GestureDetector(
+                              onTapDown: (_) {},
+                              child: AnimatedContainer(
+                                duration: const Duration(milliseconds: 150),
+                                width: 64, height: 64,
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(32),
+                                  boxShadow: playing ? [
+                                    BoxShadow(color: green.withOpacity(0.4), blurRadius: 18, spreadRadius: 2),
+                                  ] : [],
+                                ),
+                                child: Material(
+                                  color: Colors.transparent,
+                                  borderRadius: BorderRadius.circular(32),
+                                  child: InkWell(
+                                    borderRadius: BorderRadius.circular(32),
+                                    onTap: () => playing ? player.pause() : player.play(),
+                                    child: Center(
+                                      child: AnimatedSwitcher(
+                                        duration: const Duration(milliseconds: 180),
+                                        transitionBuilder: (child, anim) => ScaleTransition(
+                                          scale: Tween<double>(begin: 0.6, end: 1.0).animate(
+                                            CurvedAnimation(parent: anim, curve: Curves.easeOutBack),
+                                          ),
+                                          child: child,
+                                        ),
+                                        child: Icon(
+                                          playing ? Icons.pause : Icons.play_arrow,
+                                          key: ValueKey(playing),
+                                          size: 36,
+                                          color: Colors.black,
+                                        ),
+                                      ),
+                                    ),
                                   ),
                                 ),
                               ),
