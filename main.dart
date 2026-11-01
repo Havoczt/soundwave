@@ -21,8 +21,8 @@ import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 
 // ── Animated bottom sheet helper ────────────────────────────────────────────
-Future<T?> _showSheet<T>(
-  BuildContext context, {
+Future<T?> _showSheet<T>({
+  required BuildContext context,
   required WidgetBuilder builder,
   bool isScrollControlled = false,
   Color? backgroundColor,
@@ -195,6 +195,26 @@ const kYtApiBase = String.fromEnvironment('YT_API_BASE', defaultValue: '');
 const kYtApiKey = String.fromEnvironment('YT_API_KEY', defaultValue: '');
 final player = AudioPlayer();
 final _paletteCache = <String, Color>{};
+
+Future<void> _onSongChange(int? idx) async {
+  if (idx == null || idx >= store.queue.length) return;
+  final s = store.queue[idx];
+  if (s.art == null) return;
+  if (_paletteCache.containsKey(s.id)) {
+    themeNotifier.setDynamicAccent(_paletteCache[s.id]!);
+    return;
+  }
+  try {
+    final bytes = await File(s.art!).readAsBytes();
+    final img = MemoryImage(bytes);
+    final gen = await PaletteGenerator.fromImageProvider(img, maximumColorCount: 16);
+    final color = gen.vibrantColor?.color ??
+        gen.dominantColor?.color ??
+        swt.accent;
+    _paletteCache[s.id] = color;
+    themeNotifier.setDynamicAccent(color);
+  } catch (_) {}
+}
 
 class LocalCache {
   Directory? _root;
