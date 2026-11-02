@@ -4391,8 +4391,8 @@ class _NowPlayingLyricsPageState extends State<_NowPlayingLyricsPage> {
     Scrollable.ensureVisible(
       key!.currentContext!,
       alignment: 0.5,
-      duration: const Duration(milliseconds: 400),
-      curve: Curves.easeInOutCubic,
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.easeOut,
     );
   }
 
@@ -4500,7 +4500,7 @@ class _NowPlayingLyricsPageState extends State<_NowPlayingLyricsPage> {
     return StreamBuilder<Duration>(
       stream: player.positionStream,
       builder: (ctx, snap) {
-        final posMs = (snap.data?.inMilliseconds ?? 0) + 300;
+        final posMs = (snap.data?.inMilliseconds ?? 0) + 100;
         var curIdx = -1;
         for (var i = 0; i < _lines.length; i++) {
           if (_lines[i].ms <= posMs) curIdx = i;
@@ -4879,8 +4879,8 @@ class _LyricsSheetState extends State<LyricsSheet> {
     Scrollable.ensureVisible(
       key!.currentContext!,
       alignment: 0.5,
-      duration: const Duration(milliseconds: 400),
-      curve: Curves.easeInOutCubic,
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.easeOut,
     );
   }
 
@@ -4934,7 +4934,7 @@ class _LyricsSheetState extends State<LyricsSheet> {
               ? StreamBuilder<Duration>(
                   stream: player.positionStream,
                   builder: (ctx, snap) {
-                    final posMs = (snap.data?.inMilliseconds ?? 0) + 300;
+                    final posMs = (snap.data?.inMilliseconds ?? 0) + 100;
                     var curIdx = -1;
                     for (var i = 0; i < _lines.length; i++) {
                       if (_lines[i].ms <= posMs) curIdx = i;
@@ -4990,33 +4990,45 @@ class _LyricLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final fontSize = isCurrent ? 22.0 : isNear ? 16.0 : 14.0;
+    // Fixed font size — scale via Transform to avoid layout shift / words-fall-down
+    const baseSize = 15.0;
+    final scale = isCurrent ? 1.22 : isNear ? 1.05 : 1.0;
     final color = isCurrent
-        ? accent
+        ? Colors.white
         : isNear
-            ? Colors.white.withOpacity(0.55)
-            : Colors.white.withOpacity(0.22);
-    final weight = isCurrent ? FontWeight.w800 : FontWeight.w500;
+            ? Colors.white.withOpacity(0.50)
+            : Colors.white.withOpacity(0.20);
+    final weight = isCurrent ? FontWeight.w700 : FontWeight.w500;
 
     return AnimatedContainer(
-      duration: const Duration(milliseconds: 350),
-      curve: Curves.easeOutCubic,
-      padding: EdgeInsets.symmetric(
-        vertical: isCurrent ? 14 : isNear ? 9 : 6,
-      ),
-      child: AnimatedDefaultTextStyle(
-        duration: const Duration(milliseconds: 350),
-        curve: Curves.easeOutCubic,
-        style: TextStyle(
-          fontSize: fontSize,
-          fontWeight: weight,
-          color: color,
-          height: 1.35,
-          shadows: isCurrent
-              ? [Shadow(color: accent.withOpacity(0.5), blurRadius: 12)]
-              : null,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOut,
+      padding: EdgeInsets.symmetric(vertical: isCurrent ? 10 : isNear ? 7 : 5),
+      child: AnimatedScale(
+        scale: scale,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+        alignment: Alignment.centerLeft,
+        child: AnimatedDefaultTextStyle(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+          style: TextStyle(
+            fontSize: baseSize,
+            fontWeight: weight,
+            color: color,
+            height: 1.35,
+          ),
+          child: isCurrent
+              ? ShaderMask(
+                  blendMode: BlendMode.srcIn,
+                  shaderCallback: (bounds) => LinearGradient(
+                    colors: [accent, Colors.white],
+                    stops: const [0.0, 1.0],
+                  ).createShader(bounds),
+                  child: Text(text),
+                )
+              : Text(text),
         ),
-        child: Text(text),
       ),
     );
   }
